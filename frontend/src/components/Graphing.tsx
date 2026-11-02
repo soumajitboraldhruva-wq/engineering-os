@@ -1099,8 +1099,8 @@ export default function GraphingModule() {
       if (plotMode === 'polar2d') {
         const converted = specialPoints.map((point: { x?: number; y?: number }) => polarPoint(Number(point.x), Number(point.y)));
         nextTraces.push({
-          r: converted.map((point) => point.r),
-          theta: converted.map((point) => point.theta),
+          r: converted.map((point: { r: number; theta: number }) => point.r),
+          theta: converted.map((point: { r: number; theta: number }) => point.theta),
           type: 'scatterpolar',
           mode: 'markers+text',
           marker: { size: 9, color: '#fff', line: { width: 2.4, color: '#0f172a' } },
