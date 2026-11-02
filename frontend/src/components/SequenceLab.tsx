@@ -57,7 +57,7 @@ import {
 
 type AnyRecord = Record<string, any>;
 
-const API = 'http://127.0.0.1:8000/api/analyser';
+const API = (import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000').replace(/\/+$/, '') + '/api/analyser';
 
 const MODEL_FAMILIES = [
   ['mean', 'Mean baseline'],

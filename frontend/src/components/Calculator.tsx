@@ -1,14 +1,16 @@
 import { useState } from 'react';
 import axios from 'axios';
 
+const API_URL = (import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000').replace(/\/+$/, '');
+const API = `${API_URL}/api/calc/`;
+
 export default function CalcModule() {
   const [expr, setExpr] = useState('');
   const [result, setResult] = useState<string | null>(null);
 
   const calculate = async () => {
     try {
-      // Calls our Python backend
-      const res = await axios.post('http://127.0.0.1:8000/api/calc/', { expression: expr });
+      const res = await axios.post(API, { expression: expr });
       if (res.data.error) setResult('Error: ' + res.data.error);
       else setResult(res.data.result.toString());
     } catch (e) {

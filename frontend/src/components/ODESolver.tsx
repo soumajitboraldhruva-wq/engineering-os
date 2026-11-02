@@ -4,6 +4,9 @@ import PlotComponent from 'react-plotly.js';
 import 'katex/dist/katex.min.css';
 import { BlockMath } from 'react-katex';
 
+const API_URL = (import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000').replace(/\/+$/, '');
+const API = `${API_URL}/api/ode`;
+
 // This safely fixes the Vite + Plotly "got object" crash!
 const Plot = (PlotComponent as any).default || PlotComponent;
 
@@ -16,7 +19,7 @@ export default function ODESolver() {
 
   const solve = async () => {
     try {
-      const res = await axios.post('http://127.0.0.1:8000/api/ode/solve', { 
+      const res = await axios.post(`${API}/solve`, { 
         equation, ...params 
       });
       setSolution(res.data);

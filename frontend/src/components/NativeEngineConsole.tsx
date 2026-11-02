@@ -34,8 +34,10 @@ const MODES: EngineButton[] = [
 ];
 
 function backendWsUrl() {
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${protocol}//${window.location.hostname}:8000/api/analyser/ws`;
+  const apiUrl = (import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000').replace(/\/+$/, '');
+  const protocol = apiUrl.startsWith('https:') ? 'wss:' : 'ws:';
+  const host = apiUrl.replace(/^https?:\/\//, '');
+  return `${protocol}//${host}/api/analyser/ws`;
 }
 
 export default function NativeEngineConsole() {

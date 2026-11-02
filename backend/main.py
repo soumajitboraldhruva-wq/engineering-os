@@ -1,20 +1,19 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
+import os
 
 from api import calculator, matrices, ode, graphing, analyser
 
 app = FastAPI(title="Engineering OS API")
 
-# Keep local development permissive enough for Vite while avoiding the
-# browser credential/wildcard CORS combination that can fail in preflighted
-# requests. Add the deployed frontend origin here when you deploy.
+# CORS: allow local dev + deployed frontend (set via ALLOWED_ORIGINS env var)
+# Format: "https://your-app.vercel.app,https://another-domain.com"
+allowed_origins = os.getenv("ALLOWED_ORIGINS", "").split(",")
+default_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
+    allow_origins=[o.strip() for o in allowed_origins if o.strip()] + default_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
