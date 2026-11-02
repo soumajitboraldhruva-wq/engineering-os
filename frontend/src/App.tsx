@@ -1,0 +1,100 @@
+import { useState } from 'react';
+import {
+  Activity,
+  Calculator,
+  Grid3x3,
+  Library,
+  LineChart,
+  Settings,
+  TrendingUp,
+} from 'lucide-react';
+
+import CalcModule from './components/Calculator';
+import MatrixModule from './components/MatrixSolver';
+import ODESolver from './components/ODESolver';
+import GraphingModule from './components/Graphing';
+import SequenceLab from './components/SequenceLab';
+
+const navButtonClass = (active: boolean) =>
+  `flex w-full items-center rounded-xl p-3 text-left text-sm font-medium transition-colors ${
+    active ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-200 hover:bg-slate-800'
+  }`;
+
+export default function App() {
+  const [activeTab, setActiveTab] = useState('calc');
+
+  return (
+    <div className="flex h-screen bg-slate-100 font-sans text-slate-900">
+      <aside className="flex w-64 shrink-0 flex-col bg-slate-950 text-white">
+        <div className="border-b border-slate-800 p-5">
+          <div className="text-2xl font-bold tracking-wider">
+            ENG-OS <span className="ml-1 text-sm text-blue-400">v0.1</span>
+          </div>
+          <div className="mt-1 text-[11px] uppercase tracking-[0.18em] text-slate-500">
+            Engineering workstation
+          </div>
+        </div>
+
+        <nav className="flex-1 overflow-y-auto p-4">
+          <div className="mb-2 ml-2 text-[11px] font-bold uppercase tracking-wider text-slate-500">
+            Mathematics
+          </div>
+
+          <div className="space-y-1.5">
+            <button type="button" onClick={() => setActiveTab('calc')} className={navButtonClass(activeTab === 'calc')}>
+              <Calculator className="mr-3" size={19} />
+              Scientific
+            </button>
+            <button type="button" onClick={() => setActiveTab('graph')} className={navButtonClass(activeTab === 'graph')}>
+              <LineChart className="mr-3" size={19} />
+              Graphing Engine
+            </button>
+            <button type="button" onClick={() => setActiveTab('matrix')} className={navButtonClass(activeTab === 'matrix')}>
+              <Grid3x3 className="mr-3" size={19} />
+              Linear Algebra
+            </button>
+          </div>
+
+          <div className="mb-2 ml-2 mt-7 text-[11px] font-bold uppercase tracking-wider text-slate-500">
+            Data & Analysis
+          </div>
+          <button type="button" onClick={() => setActiveTab('sequence')} className={navButtonClass(activeTab === 'sequence')}>
+            <TrendingUp className="mr-3" size={19} />
+            Advanced Analyser
+          </button>
+
+          <div className="mb-2 ml-2 mt-7 text-[11px] font-bold uppercase tracking-wider text-slate-500">
+            Engineering
+          </div>
+          <div className="space-y-1.5">
+            <button type="button" onClick={() => setActiveTab('ode')} className={navButtonClass(activeTab === 'ode')}>
+              <Activity className="mr-3" size={19} />
+              ODE / Dynamics
+            </button>
+            <button type="button" className="flex w-full cursor-not-allowed items-center rounded-xl p-3 text-left text-sm font-medium text-slate-500 hover:bg-slate-900">
+              <Library className="mr-3" size={19} />
+              Mechanics (Soon)
+            </button>
+          </div>
+        </nav>
+
+        <div className="border-t border-slate-800 p-4">
+          <button type="button" className="flex w-full items-center rounded-xl p-2 text-sm text-slate-400 transition hover:bg-slate-900 hover:text-white">
+            <Settings className="mr-3" size={19} />
+            Settings
+          </button>
+        </div>
+      </aside>
+
+      <main className="min-w-0 flex-1 overflow-auto bg-slate-50 p-6 lg:p-8">
+        <div className="mx-auto w-full max-w-[1700px]">
+          {activeTab === 'calc' && <CalcModule />}
+          {activeTab === 'graph' && <GraphingModule />}
+          {activeTab === 'matrix' && <MatrixModule />}
+          {activeTab === 'sequence' && <SequenceLab />}
+          {activeTab === 'ode' && <ODESolver />}
+        </div>
+      </main>
+    </div>
+  );
+}
