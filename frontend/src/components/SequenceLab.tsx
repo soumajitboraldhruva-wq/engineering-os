@@ -101,8 +101,6 @@ const safeNumber = (value: unknown, digits = 4) => {
   return Number.isFinite(n) ? n.toFixed(digits) : '—';
 };
 
-const csvNumberList = (values: number[]) => values.join(', ');
-
 // ----------------------------------------------------------------------
 // Flexible data-entry helpers.
 //

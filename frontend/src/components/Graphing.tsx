@@ -7,7 +7,6 @@ import {
   type ClipboardEvent,
   type CSSProperties,
   type PointerEvent,
-  type WheelEvent as ReactWheelEvent,
   type ReactNode,
 } from 'react';
 import axios from 'axios';
@@ -24,7 +23,6 @@ import {
   Moon,
   Sun,
   Terminal,
-  Info,
   Play,
   Pause,
   Maximize2,
@@ -32,7 +30,6 @@ import {
   WifiOff,
   Crosshair,
   Box,
-  Rotate3d,
   X,
   Home,
   LayoutGrid,
@@ -80,7 +77,6 @@ const COMMAND_CATALOG = [
 ];
 
 const TRACE_COLOR = '#ff2d95';
-const COMMAND_COLOR = '#a855f7';
 
  type Quality = 'low' | 'medium' | 'high';
  type PlotMode = 'cartesian2d' | 'polar2d' | 'cartesian3d' | 'cylindrical3d' | 'spherical3d' | 'complex';
@@ -1096,24 +1092,24 @@ export default function GraphingModule() {
     });
 
     const specialPoints = (plotData?.special_points || []).filter(
-      (point: any) => expressions[point.owner]?.visible
+      (point: { owner: number; label: string; x?: number; y?: number }) => expressions[point.owner]?.visible
     );
 
     if (specialPoints.length && traceEnabled) {
       if (plotMode === 'polar2d') {
-        const converted = specialPoints.map((point: any) => polarPoint(Number(point.x), Number(point.y)));
+        const converted = specialPoints.map((point: { x?: number; y?: number }) => polarPoint(Number(point.x), Number(point.y)));
         nextTraces.push({
           r: converted.map((point) => point.r),
           theta: converted.map((point) => point.theta),
           type: 'scatterpolar',
           mode: 'markers+text',
           marker: { size: 9, color: '#fff', line: { width: 2.4, color: '#0f172a' } },
-          text: specialPoints.map((point: any) => point.label),
+          text: specialPoints.map((point: { label: string }) => point.label),
           textposition: 'top center',
           name: 'Axis intercepts',
           showlegend: false,
           hovertemplate: specialPoints.map(
-            (point: any, index: number) =>
+            (point: { label: string }, index: number) =>
               `${point.label}<br>r=${converted[index].r.toPrecision(6)}<br>θ=${converted[index].theta.toPrecision(6)}<extra></extra>`
           ),
         });
@@ -1121,13 +1117,13 @@ export default function GraphingModule() {
       } else if (is3D) {
         const converted = specialPoints.map(transform3DPoint);
         nextTraces.push({
-          x: converted.map((point: any) => point.x),
-          y: converted.map((point: any) => point.y),
-          z: converted.map((point: any) => point.z),
+          x: converted.map((point: { x: number; y: number; z: number }) => point.x),
+          y: converted.map((point: { x: number; y: number; z: number }) => point.y),
+          z: converted.map((point: { x: number; y: number; z: number }) => point.z),
           type: 'scatter3d',
           mode: 'markers+text',
           marker: { size: 6, color: '#fff', line: { width: 2, color: '#0f172a' } },
-          text: specialPoints.map((point: any) => point.label),
+          text: specialPoints.map((point: { label: string }) => point.label),
           textposition: 'top center',
           name: 'Axis intercepts',
           showlegend: false,
@@ -1135,12 +1131,12 @@ export default function GraphingModule() {
         owners.push(-1);
       } else if (plotMode !== 'complex') {
         nextTraces.push({
-          x: specialPoints.map((point: any) => point.x),
-          y: specialPoints.map((point: any) => point.y),
+          x: specialPoints.map((point: { x?: number }) => point.x),
+          y: specialPoints.map((point: { y?: number }) => point.y),
           type: 'scatter',
           mode: 'markers+text',
           marker: { size: 9, color: '#fff', line: { width: 2.4, color: '#0f172a' } },
-          text: specialPoints.map((point: any) => point.label),
+          text: specialPoints.map((point: { label: string }) => point.label),
           textposition: 'top center',
           name: 'Axis intercepts',
           showlegend: false,
@@ -1149,14 +1145,14 @@ export default function GraphingModule() {
       }
     }
 
-    baseCommandPlots.forEach((commandPlot: any) => {
+    baseCommandPlots.forEach((commandPlot: { x?: number[]; y?: number[]; z?: number[]; mode?: string; marker?: any; line?: any; fill?: any; fillcolor?: any; text?: any; name?: string }) => {
       if (plotMode === 'polar2d') {
         const converted = (commandPlot.x || []).map((x: number, index: number) =>
           polarPoint(Number(x), Number(commandPlot.y?.[index] ?? 0))
         );
         nextTraces.push({
-          r: converted.map((point) => point.r),
-          theta: converted.map((point) => point.theta),
+          r: converted.map((point: { r: number; theta: number }) => point.r),
+          theta: converted.map((point: { r: number; theta: number }) => point.theta),
           type: 'scatterpolar',
           mode: commandPlot.mode || 'markers',
           marker: commandPlot.marker,
@@ -1177,9 +1173,9 @@ export default function GraphingModule() {
           transform3DPoint({ x, y: commandPlot.y?.[index], z: commandPlot.z?.[index] })
         );
         nextTraces.push({
-          x: converted.map((point: any) => point.x),
-          y: converted.map((point: any) => point.y),
-          z: converted.map((point: any) => point.z),
+          x: converted.map((point: { x: number; y: number; z: number }) => point.x),
+          y: converted.map((point: { x: number; y: number; z: number }) => point.y),
+          z: converted.map((point: { x: number; y: number; z: number }) => point.z),
           type: 'scatter3d',
           mode: commandPlot.mode || 'markers',
           marker: commandPlot.marker,
