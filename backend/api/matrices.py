@@ -462,7 +462,7 @@ def operation_result(req: MatrixOperationRequest) -> Dict[str, Any]:
         if operation in {"transpose"}:
             return {"operation": operation, **render_matrix(M.T)}
 
-        if operation in {"determinant", "trace", "inverse", "eigenvalues", "eigenvectors", "svd", "qr", "lu", "cholesky", "pseudoinverse", "pinv", "norm", "multiply", "power"}:
+        if operation in {"rank", "determinant", "trace", "inverse", "eigenvalues", "eigenvectors", "svd", "qr", "lu", "cholesky", "pseudoinverse", "pinv", "norm", "multiply", "power"}:
             A = numeric_matrix(M)
 
         if operation == "determinant":
