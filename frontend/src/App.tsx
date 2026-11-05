@@ -78,6 +78,7 @@ export default function App() {
             ['graph', 'Graphing'],
             ['matrix', 'Linear Algebra'],
             ['sequence', 'Advanced Analyser'],
+            ['ode', 'Differential Equations'],
           ].map(([id, label]) => (
             <button
               key={id}
