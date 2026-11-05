@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Any, Dict, List, Optional, Tuple
 import json
 import re
@@ -141,6 +141,64 @@ class GraphRequest(BaseModel):
     complex_view: str = "magnitude"
     angle_unit: str = "degrees"
     axis: Dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("t_val")
+    @classmethod
+    def validate_time_value(cls, value: float) -> float:
+        if not np.isfinite(value):
+            raise ValueError("Time value must be finite.")
+        return value
+
+    @field_validator("quality")
+    @classmethod
+    def validate_quality(cls, value: str) -> str:
+        if value not in QUALITY_PRESETS:
+            raise ValueError("Quality must be low, medium, or high.")
+        return value
+
+    @field_validator("coordinate_system")
+    @classmethod
+    def validate_coordinate_system(cls, value: str) -> str:
+        supported = {"cartesian2d", "polar2d", "cartesian3d", "cylindrical3d", "spherical3d", "complex"}
+        if value not in supported:
+            raise ValueError("Unsupported coordinate system.")
+        return value
+
+    @field_validator("complex_view")
+    @classmethod
+    def validate_complex_view(cls, value: str) -> str:
+        if value not in ("magnitude", "real", "imag", "phase", "surface"):
+            raise ValueError("Complex view must be magnitude, real, imag, phase, or surface.")
+        return value
+
+    @field_validator("angle_unit")
+    @classmethod
+    def validate_angle_unit(cls, value: str) -> str:
+        if value not in ("degrees", "radians"):
+            raise ValueError("Angle unit must be degrees or radians.")
+        return value
+
+    @field_validator("axis")
+    @classmethod
+    def validate_axis_values(cls, value: Dict[str, Any]) -> Dict[str, Any]:
+        numeric_keys = {
+            "x_min", "x_max", "y_min", "y_max", "z_min", "z_max",
+            "theta_min", "theta_max", "r_max", "phi_min", "phi_max",
+            "re_min", "re_max", "im_min", "im_max", "theta_rotation",
+        }
+        for key in numeric_keys.intersection(value):
+            try:
+                number = float(value[key])
+            except (TypeError, ValueError):
+                raise ValueError(f"Axis value {key} must be numeric.")
+            if not np.isfinite(number):
+                raise ValueError(f"Axis value {key} must be finite.")
+        for key in ("x_scale", "y_scale"):
+            if key in value and value[key] not in ("linear", "log"):
+                raise ValueError(f"{key} must be linear or log.")
+        if "theta_direction" in value and value["theta_direction"] not in ("counterclockwise", "clockwise"):
+            raise ValueError("Theta direction must be clockwise or counterclockwise.")
+        return value
 
 
 @lru_cache(maxsize=256)
@@ -1340,11 +1398,21 @@ def _function_data(meta, eq, req):
     return None, None, None
 
 
+def _trapezoid(values: np.ndarray, coords: np.ndarray, axis: int = -1):
+    """Integrate with NumPy 1.x and 2.x compatible trapezoidal APIs."""
+    integrate = getattr(np, "trapezoid", None)
+    if integrate is None:
+        integrate = getattr(np, "trapz", None)
+    if integrate is None:
+        raise RuntimeError("NumPy does not expose a trapezoidal integration function.")
+    return integrate(values, coords, axis=axis)
+
+
 def _numeric_integral(values: np.ndarray, coords: np.ndarray) -> float:
     finite = np.isfinite(values) & np.isfinite(coords)
     if finite.sum() < 2:
         return 0.0
-    return float(np.trapezoid(values[finite], coords[finite]))
+    return float(_trapezoid(values[finite], coords[finite]))
 
 
 def _eval_explicit_function(fn_expr: sp.Expr, variable: sp.Symbol, lo: float, hi: float, count: int = 3000):
@@ -2070,14 +2138,14 @@ def generate_plot_data(req: GraphRequest):
                     i=resolve_one(args[:1],"volume_under(surface,xmin,xmax,ymin,ymax)"); meta=parsed_meta[i]; fn_expr=_surface_function(meta,parsed_eqs[i]);
                     if fn_expr is None: raise ValueError("volume_under requires z=f(x,y).")
                     command_results.append(selection_preface([(expression_names[i], i, parsed_eqs[i])]))
-                    x0=float(args[1]) if len(args)==5 else _axis(req,"x_min",-20); x1=float(args[2]) if len(args)==5 else _axis(req,"x_max",20); y0=float(args[3]) if len(args)==5 else _axis(req,"y_min",-20); y1=float(args[4]) if len(args)==5 else _axis(req,"y_max",20); n=220; gx=np.linspace(x0,x1,n); gy=np.linspace(y0,y1,n); X,Y=np.meshgrid(gx,gy); f=sp.lambdify((sp.Symbol("x"),sp.Symbol("y")),fn_expr.subs(sp.Symbol("t"),req.t_val),modules=["numpy"]); V=np.nan_to_num(_safe_array(f(X,Y)),nan=0.0,posinf=0.0,neginf=0.0); volume=float(np.trapezoid(np.trapezoid(V,gy,axis=0),gx)); command_results.append(f"\\text{{Signed volume over }} [{x0:g},{x1:g}]\\times[{y0:g},{y1:g}] \\text{{ = }} {sp.N(volume,10)}")
+                    x0=float(args[1]) if len(args)==5 else _axis(req,"x_min",-20); x1=float(args[2]) if len(args)==5 else _axis(req,"x_max",20); y0=float(args[3]) if len(args)==5 else _axis(req,"y_min",-20); y1=float(args[4]) if len(args)==5 else _axis(req,"y_max",20); n=220; gx=np.linspace(x0,x1,n); gy=np.linspace(y0,y1,n); X,Y=np.meshgrid(gx,gy); f=sp.lambdify((sp.Symbol("x"),sp.Symbol("y")),fn_expr.subs(sp.Symbol("t"),req.t_val),modules=["numpy"]); V=np.nan_to_num(_safe_array(f(X,Y)),nan=0.0,posinf=0.0,neginf=0.0); volume=float(_trapezoid(_trapezoid(V,gy,axis=0),gx)); command_results.append(f"\\text{{Signed volume over }} [{x0:g},{x1:g}]\\times[{y0:g},{y1:g}] \\text{{ = }} {sp.N(volume,10)}")
 
                 elif canonical == "surface_area":
                     if len(args) not in {1,5}: raise ValueError("Usage: surface_area(surface[, xmin, xmax, ymin, ymax])")
                     i=resolve_one(args[:1],"surface_area(surface,xmin,xmax,ymin,ymax)"); meta=parsed_meta[i]; fn_expr=_surface_function(meta,parsed_eqs[i]);
                     if fn_expr is None: raise ValueError("surface_area requires z=f(x,y).")
                     command_results.append(selection_preface([(expression_names[i], i, parsed_eqs[i])]))
-                    x0=float(args[1]) if len(args)==5 else _axis(req,"x_min",-20); x1=float(args[2]) if len(args)==5 else _axis(req,"x_max",20); y0=float(args[3]) if len(args)==5 else _axis(req,"y_min",-20); y1=float(args[4]) if len(args)==5 else _axis(req,"y_max",20); gx=np.linspace(x0,x1,180); gy=np.linspace(y0,y1,180); X,Y=np.meshgrid(gx,gy); sx=sp.diff(fn_expr,sp.Symbol("x")); sy=sp.diff(fn_expr,sp.Symbol("y")); fx=sp.lambdify((sp.Symbol("x"),sp.Symbol("y")),sx,modules=["numpy"]); fy=sp.lambdify((sp.Symbol("x"),sp.Symbol("y")),sy,modules=["numpy"]); integrand=np.sqrt(1+np.nan_to_num(_safe_array(fx(X,Y)),nan=0.0,posinf=0.0,neginf=0.0)**2+np.nan_to_num(_safe_array(fy(X,Y)),nan=0.0,posinf=0.0,neginf=0.0)**2); area=float(np.trapezoid(np.trapezoid(integrand,gy,axis=0),gx)); command_results.append(f"\\text{{Surface area over }} [{x0:g},{x1:g}]\\times[{y0:g},{y1:g}] \\text{{ = }} {sp.N(area,10)}")
+                    x0=float(args[1]) if len(args)==5 else _axis(req,"x_min",-20); x1=float(args[2]) if len(args)==5 else _axis(req,"x_max",20); y0=float(args[3]) if len(args)==5 else _axis(req,"y_min",-20); y1=float(args[4]) if len(args)==5 else _axis(req,"y_max",20); gx=np.linspace(x0,x1,180); gy=np.linspace(y0,y1,180); X,Y=np.meshgrid(gx,gy); sx=sp.diff(fn_expr,sp.Symbol("x")); sy=sp.diff(fn_expr,sp.Symbol("y")); fx=sp.lambdify((sp.Symbol("x"),sp.Symbol("y")),sx,modules=["numpy"]); fy=sp.lambdify((sp.Symbol("x"),sp.Symbol("y")),sy,modules=["numpy"]); integrand=np.sqrt(1+np.nan_to_num(_safe_array(fx(X,Y)),nan=0.0,posinf=0.0,neginf=0.0)**2+np.nan_to_num(_safe_array(fy(X,Y)),nan=0.0,posinf=0.0,neginf=0.0)**2); area=float(_trapezoid(_trapezoid(integrand,gy,axis=0),gx)); command_results.append(f"\\text{{Surface area over }} [{x0:g},{x1:g}]\\times[{y0:g},{y1:g}] \\text{{ = }} {sp.N(area,10)}")
 
                 elif canonical == "volume_between":
                     # Generalizes volume_under from "one surface vs. implicit z=0" to
@@ -2109,7 +2177,7 @@ def generate_plot_data(req: GraphRequest):
                     ZA = np.nan_to_num(np.broadcast_to(_safe_array(fA(X, Y)), X.shape), nan=0.0)
                     ZB = np.nan_to_num(np.broadcast_to(_safe_array(fB(X, Y)), X.shape), nan=0.0)
                     gap = np.abs(ZA - ZB)
-                    volume = float(np.trapezoid(np.trapezoid(gap, gy, axis=0), gx))
+                    volume = float(_trapezoid(_trapezoid(gap, gy, axis=0), gx))
                     # Draw both selected surfaces (translucent, distinct from the main
                     # plot's own surfaces) so it's visually obvious which two bounded
                     # the computed volume, not just their names in the text result.
