@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import os
 
-from api import calculator, matrices, ode, graphing, analyser
+from api import calculator, matrices, ode, graphing, analyser, cube
 
 app = FastAPI(title="Engineering OS API")
 
@@ -47,6 +47,12 @@ app.include_router(
     analyser.router,
     prefix="/api/analyser",
     tags=["Sequence & Curve Analyser"],
+)
+
+app.include_router(
+    cube.router,
+    prefix="/api/cube",
+    tags=["Cube Solver"],
 )
 
 
