@@ -1133,9 +1133,10 @@ function FileScreen({ go, dark }: { go: (screen: string) => void; dark: boolean 
     setFileName(file.name);
     setText(contents);
     setGroupIndex(0);
-    setSelectedColumns(parsed[0] ? numericColumns(parsed[0]) : []);
-    setXColumn(0);
-    setYColumn(1);
+    const detectedColumns = parsed[0] ? numericColumns(parsed[0]) : [];
+    setSelectedColumns(detectedColumns);
+    setXColumn(detectedColumns[0] ?? 0);
+    setYColumn(detectedColumns[1] ?? detectedColumns[0] ?? 0);
     setResult(null);
     setError(parsed.length ? "" : "No numeric table was detected. Check the delimiter, headers and data rows.");
     event.target.value = "";
@@ -1145,9 +1146,10 @@ function FileScreen({ go, dark }: { go: (screen: string) => void; dark: boolean 
     setText(value);
     setGroupIndex(0);
     const parsed = parseImportedDataset(value);
-    setSelectedColumns(parsed[0] ? numericColumns(parsed[0]) : []);
-    setXColumn(0);
-    setYColumn(1);
+    const detectedColumns = parsed[0] ? numericColumns(parsed[0]) : [];
+    setSelectedColumns(detectedColumns);
+    setXColumn(detectedColumns[0] ?? 0);
+    setYColumn(detectedColumns[1] ?? detectedColumns[0] ?? 0);
     setResult(null);
     setError("");
   };
