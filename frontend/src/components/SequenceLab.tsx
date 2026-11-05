@@ -192,6 +192,10 @@ function parseImportedDataset(text: string): ImportedDataGroup[] {
   for (const raw of lines) {
     const line = raw.trim();
     if (!line || line.startsWith('#') || line.startsWith('//')) continue;
+    if (delimiter === ' ' && current.rows.length && /^(?:section|dataset|experiment|trial|run|sheet|group)\\b/i.test(line)) {
+      beginSection(line);
+      continue;
+    }
     const cells = splitImportLine(line, delimiter);
     if (!cells.length || cells.every((cell) => !cell)) continue;
 
@@ -1159,21 +1163,31 @@ function FileScreen({ go, dark }: { go: (screen: string) => void; dark: boolean 
     if (mode === 0) chosen = selectedColumns.slice(0, 1);
     else if (mode === 2) chosen = [xColumn, yColumn];
     else chosen = selectedColumns;
-    const required = mode === 0 ? 1 : mode === 3 ? 2 : 2;
+
+    const exactColumns = mode === 3 ? 2 : [4, 5, 6].includes(mode) ? 3 : null;
+    if (exactColumns !== null && chosen.length !== exactColumns) {
+      setError(mode === 3
+        ? "Select exactly two numeric columns for polar coordinates."
+        : "Select exactly three numeric columns for this 3D coordinate mode.");
+      return;
+    }
+    const required = mode === 0 ? 1 : 2;
     if (chosen.length < required || new Set(chosen).size !== chosen.length) {
       setError(mode === 0 ? "Select one numeric column for a sequence." : mode === 2 ? "Choose different X and Y columns." : "Select the required numeric columns.");
+      return;
+    }
+    if (mode === 1 && chosen.length > 64) {
+      setError("Multivariate analysis supports at most 64 selected numeric columns.");
       return;
     }
     const cleanRows = activeGroup.rows
       .filter((row) => chosen.every((column) => Number.isFinite(row[column])))
       .map((row) => chosen.map((column) => row[column]));
-    if (mode === 1 && chosen.length < 2) { setError("Multivariate analysis needs at least two selected variables."); return; }
-    if ((mode === 4 || mode === 5 || mode === 6) && chosen.length < 3) { setError("This 3D coordinate mode needs three numeric columns."); return; }
     if (cleanRows.length < (mode === 1 ? 8 : 3)) {
       setError(mode === 1 ? "Multivariate analysis needs at least 8 complete rows. Choose columns with fewer missing values." : "At least three complete data rows are required.");
       return;
     }
-    const payloadText = cleanRows.map((row) => row.join(" ")).join("\\n");
+    const payloadText = cleanRows.map((row) => row.join(" ")).join("\n");
     setLoading(true);
     setError("");
     try {
@@ -1197,7 +1211,7 @@ function FileScreen({ go, dark }: { go: (screen: string) => void; dark: boolean 
             <input type="file" className="hidden" onChange={handleFile} accept=".txt,.csv,.tsv,.dat,.log" />
           </label>
           <Field label="File contents / paste data">
-            <textarea value={text} onChange={(event) => handleTextChange(event.target.value)} rows={12} className={`${controlClass} mt-2 resize-y font-mono text-xs`} placeholder={"Time,Temperature,Pressure\\n0,21.5,101.2\\n1,22.1,101.4"} />
+            <textarea value={text} onChange={(event) => handleTextChange(event.target.value)} rows={12} className={`${controlClass} mt-2 resize-y font-mono text-xs`} placeholder={"Time,Temperature,Pressure\n0,21.5,101.2\n1,22.1,101.4"} />
           </Field>
           <div className="rounded-xl border border-slate-200 p-3 dark:border-slate-700">
             <div className="flex flex-wrap items-center justify-between gap-2">
