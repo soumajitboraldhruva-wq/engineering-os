@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import type { ChangeEvent, ReactNode } from 'react';
 import axios from 'axios';
 import PlotComponent from 'react-plotly.js';
@@ -142,6 +142,78 @@ function transposeRagged(matrix: number[][]): number[][] {
     });
   });
   return out;
+}
+
+type ImportedDataGroup = { id: string; title: string; headers: string[]; rows: number[][] };
+
+function splitImportLine(line: string, delimiter: string): string[] {
+  if (delimiter === " ") return line.trim().split(/\\s+/);
+  const cells: string[] = [];
+  let cell = "";
+  let quoted = false;
+  for (let i = 0; i < line.length; i += 1) {
+    const char = line[i];
+    if (char === '"' && quoted && line[i + 1] === '"') { cell += '"'; i += 1; }
+    else if (char === '"') quoted = !quoted;
+    else if (char === delimiter && !quoted) { cells.push(cell.trim()); cell = ""; }
+    else cell += char;
+  }
+  cells.push(cell.trim());
+  return cells;
+}
+
+function parseImportedDataset(text: string): ImportedDataGroup[] {
+  const lines = text.replace(/^\\uFEFF/, "").split(/\\r?\\n/);
+  const meaningful = lines.map((line) => line.trim()).filter((line) => line && !line.startsWith("#") && !line.startsWith("//"));
+  if (!meaningful.length) return [];
+  const sample = meaningful.slice(0, 12).join("\\n");
+  const counts = [",", "\\t", ";"].map((delimiter) => ({ delimiter, count: (sample.match(new RegExp(delimiter === "\\t" ? "\\t" : `\\${delimiter}`, "g")) ?? []).length }));
+  const best = counts.sort((a, b) => b.count - a.count)[0];
+  const delimiter = best.count > 0 ? best.delimiter : " ";
+  const groups: ImportedDataGroup[] = [];
+  let current: ImportedDataGroup = { id: "section-1", title: "Dataset", headers: [], rows: [] };
+  let sectionNumber = 1;
+  const beginSection = (title?: string) => {
+    if (current.rows.length || current.headers.length) groups.push(current);
+    sectionNumber += 1;
+    current = { id: `section-${sectionNumber}`, title: title?.trim() || `Dataset ${sectionNumber}`, headers: [], rows: [] };
+  };
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#") || line.startsWith("//")) continue;
+    const cells = splitImportLine(line, delimiter);
+    if (!cells.length || cells.every((cell) => !cell)) continue;
+    const numeric = cells.map((cell) => cell === "" ? Number.NaN : Number(cell));
+    const allNumeric = cells.every((cell, index) => cell !== "" && Number.isFinite(numeric[index]));
+    const hasText = cells.some((cell, index) => cell !== "" && !Number.isFinite(numeric[index]));
+    if (cells.length === 1 && hasText) {
+      if (current.rows.length || current.headers.length) beginSection(cells[0]);
+      else current.title = cells[0];
+      continue;
+    }
+    if (hasText) {
+      const header = cells.map((cell, index) => cell || `Column ${index + 1}`);
+      if (current.rows.length) beginSection();
+      current.headers = header;
+      continue;
+    }
+    if (!allNumeric) continue;
+    if (!current.headers.length) current.headers = cells.map((_, index) => `Column ${index + 1}`);
+    if (cells.length > current.headers.length) {
+      for (let i = current.headers.length; i < cells.length; i += 1) current.headers.push(`Column ${i + 1}`);
+    }
+    const row = Array.from({ length: current.headers.length }, (_, index) => numeric[index] ?? Number.NaN);
+    current.rows.push(row);
+  }
+  if (current.rows.length || current.headers.length) groups.push(current);
+  return groups
+    .filter((group) => group.rows.some((row) => row.some((value) => Number.isFinite(value))))
+    .map((group, index) => ({ ...group, id: `section-${index + 1}` }));
+}
+
+function numericColumns(group?: ImportedDataGroup): number[] {
+  if (!group) return [];
+  return group.headers.map((_, index) => index).filter((index) => group.rows.some((row) => Number.isFinite(row[index])));
 }
 
 type Layout = 'rows' | 'columns';
@@ -983,75 +1055,203 @@ function CoordinatesScreen({ go, dark }: { go: (screen: string) => void; dark: b
 function FileScreen({ go, dark }: { go: (screen: string) => void; dark: boolean }) {
   const [fileName, setFileName] = useState('');
   const [text, setText] = useState('');
+  const [groupIndex, setGroupIndex] = useState(0);
+  const [selectedColumns, setSelectedColumns] = useState<number[]>([]);
+  const [xColumn, setXColumn] = useState(0);
+  const [yColumn, setYColumn] = useState(1);
   const [mode, setMode] = useState(0);
-  const [variables, setVariables] = useState(3);
   const [angleUnit, setAngleUnit] = useState(0);
   const [horizon, setHorizon] = useState(4);
   const [tolerance, setTolerance] = useState(-1);
   const [result, setResult] = useState<AnyRecord | null>(null);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const groups = useMemo(() => parseImportedDataset(text), [text]);
+  const activeGroup = groups[groupIndex] ?? groups[0];
+  const columns = numericColumns(activeGroup);
 
   const handleFile = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
+    const contents = await file.text();
+    const parsed = parseImportedDataset(contents);
     setFileName(file.name);
-    setText(await file.text());
+    setText(contents);
+    setGroupIndex(0);
+    setSelectedColumns(parsed[0] ? numericColumns(parsed[0]) : []);
+    setXColumn(0);
+    setYColumn(1);
+    setResult(null);
+    setError(parsed.length ? "" : "No numeric table was detected. Check the delimiter, headers and data rows.");
+    event.target.value = "";
+  };
+
+  const handleTextChange = (value: string) => {
+    setText(value);
+    setGroupIndex(0);
+    const parsed = parseImportedDataset(value);
+    setSelectedColumns(parsed[0] ? numericColumns(parsed[0]) : []);
+    setXColumn(0);
+    setYColumn(1);
+    setResult(null);
+    setError("");
+  };
+
+  const selectGroup = (index: number) => {
+    setGroupIndex(index);
+    setSelectedColumns(numericColumns(groups[index]));
+    setXColumn(columns[0] ?? 0);
+    setYColumn(columns[1] ?? columns[0] ?? 0);
+    setResult(null);
+    setError("");
+  };
+
+  const toggleColumn = (index: number) => {
+    setSelectedColumns((current) => current.includes(index)
+      ? current.filter((item) => item !== index)
+      : [...current, index].sort((a, b) => a - b));
+    setResult(null);
   };
 
   const execute = async () => {
-    if (!text.trim()) {
-      alert('Choose or paste a dataset first.');
+    if (!activeGroup || !activeGroup.rows.length) { setError("Choose a file or paste a dataset first."); return; }
+    let chosen: number[];
+    if (mode === 0) chosen = selectedColumns.slice(0, 1);
+    else if (mode === 2) chosen = [xColumn, yColumn];
+    else chosen = selectedColumns;
+    const required = mode === 0 ? 1 : mode === 3 ? 2 : 2;
+    if (chosen.length < required || new Set(chosen).size !== chosen.length) {
+      setError(mode === 0 ? "Select one numeric column for a sequence." : mode === 2 ? "Choose different X and Y columns." : "Select the required numeric columns.");
       return;
     }
+    const cleanRows = activeGroup.rows
+      .filter((row) => chosen.every((column) => Number.isFinite(row[column])))
+      .map((row) => chosen.map((column) => row[column]));
+    if (mode === 1 && chosen.length < 2) { setError("Multivariate analysis needs at least two selected variables."); return; }
+    if ((mode === 4 || mode === 5 || mode === 6) && chosen.length < 3) { setError("This 3D coordinate mode needs three numeric columns."); return; }
+    if (cleanRows.length < (mode === 1 ? 8 : 3)) {
+      setError(mode === 1 ? "Multivariate analysis needs at least 8 complete rows. Choose columns with fewer missing values." : "At least three complete data rows are required.");
+      return;
+    }
+    const payloadText = cleanRows.map((row) => row.join(" ")).join("\\n");
     setLoading(true);
+    setError("");
     try {
-      const { data } = await axios.post(`${API}/file`, { text, mode, variables, angle_unit: angleUnit, horizon, tolerance });
+      const { data } = await axios.post(`${API}/file`, {
+        text: payloadText, mode, variables: chosen.length, angle_unit: angleUnit, horizon, tolerance,
+      }, { timeout: 180000 });
+      if (data?.ok === false || data?.error) throw new Error(data?.error || "Native analyser rejected the dataset.");
       setResult(data);
-    } catch (error: any) {
-      alert(error.response?.data?.detail ?? 'File analysis failed.');
+    } catch (requestError: any) {
+      const detail = requestError.response?.data?.detail;
+      setError(Array.isArray(detail) ? detail.map((item: any) => item.msg || "Invalid input").join("; ") : detail || requestError.message || "File analysis failed.");
     } finally { setLoading(false); }
   };
 
   return (
-    <PageShell title="Load Dataset / Sequence from File" subtitle="Upload a local text/CSV-style file in the browser. The file bytes are sent as text to C++ for interpretation; the browser does not reimplement the file-mode mathematics." onBack={() => go('home')}>
-      <div className="grid gap-5 xl:grid-cols-[390px_1fr]">
-        <div className={`${shellCard} p-5`}>
+    <PageShell title="Load & Group Dataset" subtitle="Import CSV or text files, detect table headings and sections, choose numeric columns, and send only the selected clean series to the existing native analyser." onBack={() => go("home")}>
+      <div className="grid gap-5 xl:grid-cols-[410px_minmax(0,1fr)]">
+        <div className={`${shellCard} space-y-4 p-5`}>
           <label className={`${secondaryButton} w-full cursor-pointer`}>
-            <Upload size={16} /> {fileName || 'Choose dataset file'}
-            <input type="file" className="hidden" onChange={handleFile} accept=".txt,.csv,.dat,.log" />
+            <Upload size={16} /> {fileName || "Choose CSV / text file"}
+            <input type="file" className="hidden" onChange={handleFile} accept=".txt,.csv,.tsv,.dat,.log" />
           </label>
-          <Field label="Interpretation"><select value={mode} onChange={(e) => setMode(Number(e.target.value))} className={`${controlClass} mt-3`}><option value={0}>1D sequence</option><option value={1}>N-dimensional / multivariate</option><option value={2}>2D Cartesian</option><option value={3}>2D Polar</option><option value={4}>3D Cartesian</option><option value={5}>3D Cylindrical</option><option value={6}>3D Spherical</option></select></Field>
-          {mode === 1 && <Field label="Variables per row"><input type="number" min={2} max={64} value={variables} onChange={(e) => setVariables(Number(e.target.value) || 2)} className={`${controlClass} mt-3`} /></Field>}
-          {(mode === 3 || mode >= 5) && <Field label="Angle units"><select value={angleUnit} onChange={(e) => setAngleUnit(Number(e.target.value))} className={`${controlClass} mt-3`}><option value={0}>Radians</option><option value={1}>Degrees</option></select></Field>}
-          <div className="mt-4 grid grid-cols-2 gap-3"><Field label="Horizon"><input type="number" min={1} value={horizon} onChange={(e) => setHorizon(Number(e.target.value) || 1)} className={controlClass} /></Field><Field label="Tolerance"><input type="number" min={-1} step="0.1" value={tolerance} onChange={(e) => setTolerance(Number(e.target.value))} className={controlClass} /></Field></div>
-          <Field label="File preview / pasted text"><textarea value={text} onChange={(e) => setText(e.target.value)} rows={18} className={`${controlClass} mt-3 resize-y font-mono text-xs`} /></Field>
-          <p className="mt-2 text-[11px] leading-4 text-slate-400 dark:text-slate-500">
-            File contents follow the same row-per-point layout as every other screen. If your file is laid out with one variable per line instead, transpose it in the Multivariate screen first, or edit the preview above before analyzing.
-          </p>
-          <button type="button" onClick={execute} disabled={loading} className={`${primaryButton} mt-4 w-full`}>{loading ? <RefreshCcw size={16} className="animate-spin" /> : <FileText size={16} />} Analyze loaded data</button>
-        </div>
-        <div>{result ? (
-          mode === 1 ? (
-            <div className="space-y-5">
-              <div className={`${shellCard} p-5`}>
-                <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                  <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-900/60"><div className="text-[10px] font-bold uppercase text-slate-400 dark:text-slate-500">Rows</div><div className="mt-1 font-mono text-sm font-semibold">{result.analysis?.rows ?? result.rows?.length ?? '—'}</div></div>
-                  <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-900/60"><div className="text-[10px] font-bold uppercase text-slate-400 dark:text-slate-500">Variables</div><div className="mt-1 font-mono text-sm font-semibold">{result.analysis?.variables ?? variables}</div></div>
-                  <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-900/60"><div className="text-[10px] font-bold uppercase text-slate-400 dark:text-slate-500">Forecast</div><div className="mt-1 text-sm font-semibold">{result.analysis?.fullForecastAvailable ? 'Available' : 'Not available'}</div></div>
-                  <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-900/60"><div className="text-[10px] font-bold uppercase text-slate-400 dark:text-slate-500">Tolerance</div><div className="mt-1 font-mono text-sm font-semibold">{safeNumber(result.analysis?.tolerancePct, 3)}%</div></div>
-                </div>
+          <Field label="File contents / paste data">
+            <textarea value={text} onChange={(event) => handleTextChange(event.target.value)} rows={12} className={`${controlClass} mt-2 resize-y font-mono text-xs`} placeholder={"Time,Temperature,Pressure\\n0,21.5,101.2\\n1,22.1,101.4"} />
+          </Field>
+          <div className="rounded-xl border border-slate-200 p-3 dark:border-slate-700">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="text-sm font-semibold">Detected sections</div>
+              <span className="text-xs text-slate-500">{groups.length} group(s)</span>
+            </div>
+            {groups.length ? (
+              <div className="mt-2 space-y-2">
+                <Field label="Active section">
+                  <select value={groupIndex} onChange={(event) => selectGroup(Number(event.target.value))} className={`${controlClass} mt-1`}>
+                    {groups.map((group, index) => <option key={group.id} value={index}>{group.title} · {group.rows.length} rows</option>)}
+                  </select>
+                </Field>
+                {activeGroup && <div className="text-[11px] text-slate-500">Detected {activeGroup.headers.length} column(s). Rows with missing values are excluded only from the selected series.</div>}
               </div>
-              <div className={`${shellCard} overflow-hidden`}>
-                <div className="border-b border-slate-200 px-5 py-4 dark:border-slate-700"><h3 className="font-bold">Loaded multivariate trajectories</h3></div>
-                <div className="h-[520px] p-2">
-                  <Plot data={Array.from({ length: variables }).map((_, j) => ({ x: (result.rows ?? []).map((_: number[], i: number) => i + 1), y: (result.rows ?? []).map((row: number[]) => row[j]), mode: 'lines+markers', type: 'scatter', name: `Variable ${j + 1}` })).concat((result.analysis?.predictions ?? []).length ? Array.from({ length: variables }).map((_, j) => ({ x: (result.analysis.predictions ?? []).map((_: number[], i: number) => (result.rows ?? []).length + i + 1), y: (result.analysis.predictions ?? []).map((row: number[]) => row[j]), mode: 'lines+markers', type: 'scatter', name: `Forecast ${j + 1}`, line: { dash: 'dot' } })) : [])} layout={{ autosize: true, margin: { l: 60, r: 25, t: 30, b: 55 }, xaxis: { title: 'row', gridcolor: dark ? '#334155' : '#e2e8f0' }, yaxis: { title: 'value', gridcolor: dark ? '#334155' : '#e2e8f0' }, legend: { orientation: 'h', y: 1.08 }, paper_bgcolor: dark ? '#1e293b' : 'white', plot_bgcolor: dark ? '#1e293b' : 'white', font: { color: dark ? '#e2e8f0' : '#1e293b' } }} style={{ width: '100%', height: '100%' }} useResizeHandler config={{ responsive: true, displaylogo: false }} />
+            ) : <p className="mt-2 text-xs text-slate-500">Choose a CSV/text file or paste content to detect numeric tables.</p>}
+          </div>
+          {activeGroup && (
+            <div className="rounded-xl border border-slate-200 p-3 dark:border-slate-700">
+              <div className="mb-2 text-sm font-semibold">Numeric columns</div>
+              <div className="grid gap-2 sm:grid-cols-2">
+                {columns.map((column) => (
+                  <label key={column} className="flex min-w-0 items-center gap-2 rounded-lg bg-slate-50 px-3 py-2 text-xs dark:bg-slate-900">
+                    <input type="checkbox" checked={selectedColumns.includes(column)} onChange={() => toggleColumn(column)} />
+                    <span className="truncate">{activeGroup.headers[column]}</span>
+                  </label>
+                ))}
+              </div>
+              <p className="mt-2 text-[11px] text-slate-500">Sequence mode uses the first checked column. Multivariate mode uses all checked columns.</p>
+              {mode === 2 && columns.length >= 2 && (
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  <Field label="X axis"><select value={xColumn} onChange={(event) => setXColumn(Number(event.target.value))} className={`${controlClass} mt-1`}>{columns.map((column) => <option key={column} value={column}>{activeGroup.headers[column]}</option>)}</select></Field>
+                  <Field label="Y axis"><select value={yColumn} onChange={(event) => setYColumn(Number(event.target.value))} className={`${controlClass} mt-1`}>{columns.map((column) => <option key={column} value={column}>{activeGroup.headers[column]}</option>)}</select></Field>
                 </div>
+              )}
+            </div>
+          )}
+          <Field label="Interpretation">
+            <select value={mode} onChange={(event) => setMode(Number(event.target.value))} className={controlClass}>
+              <option value={0}>1D sequence</option>
+              <option value={1}>N-dimensional / multivariate</option>
+              <option value={2}>2D Cartesian (X / Y)</option>
+              <option value={3}>2D Polar (radius / angle)</option>
+              <option value={4}>3D Cartesian (X / Y / Z)</option>
+              <option value={5}>3D Cylindrical (radius / angle / height)</option>
+              <option value={6}>3D Spherical (radius / azimuth / polar angle)</option>
+            </select>
+          </Field>
+          {(mode === 3 || mode >= 5) && <Field label="Angle units"><select value={angleUnit} onChange={(event) => setAngleUnit(Number(event.target.value))} className={controlClass}><option value={0}>Radians</option><option value={1}>Degrees</option></select></Field>}
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Forecast horizon"><input type="number" min={1} max={1000} value={horizon} onChange={(event) => setHorizon(Math.max(1, Math.min(1000, Number(event.target.value) || 1)))} className={controlClass} /></Field>
+            <Field label="Tolerance (%)"><input type="number" min={-1} max={100} step="0.1" value={tolerance} onChange={(event) => setTolerance(Number(event.target.value))} className={controlClass} /></Field>
+          </div>
+          {error && <div role="alert" className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300">{error}</div>}
+          <button type="button" onClick={execute} disabled={loading || !activeGroup} className={`${primaryButton} w-full`}>{loading ? <RefreshCcw size={16} className="animate-spin" /> : <FileText size={16} />} Analyse selected data</button>
+        </div>
+        <div className="space-y-5">
+          {activeGroup && (
+            <div className={`${shellCard} overflow-hidden`}>
+              <div className="border-b border-slate-200 px-5 py-4 dark:border-slate-700">
+                <h3 className="font-bold">Preview · {activeGroup.title}</h3>
+                <p className="mt-1 text-xs text-slate-500">Showing up to five parsed rows. Column labels are retained for selection.</p>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-slate-200 text-xs dark:divide-slate-700">
+                  <thead className="bg-slate-50 dark:bg-slate-900"><tr>{activeGroup.headers.map((header, index) => <th key={index} className="whitespace-nowrap px-3 py-2 text-left font-semibold text-slate-600 dark:text-slate-300">{header}</th>)}</tr></thead>
+                  <tbody>{activeGroup.rows.slice(0, 5).map((row, rowIndex) => <tr key={rowIndex} className="odd:bg-white even:bg-slate-50 dark:odd:bg-slate-800 dark:even:bg-slate-900">{activeGroup.headers.map((_, column) => <td key={column} className="whitespace-nowrap px-3 py-2 font-mono">{Number.isFinite(row[column]) ? row[column] : "—"}</td>)}</tr>)}</tbody>
+                </table>
               </div>
             </div>
-          ) : (
-            <div className="space-y-5"><AnalysisSummary result={result} /><SequencePlot result={result} title="Loaded-data analysis" dark={dark} /></div>
-          )
-        ) : <div className={`${shellCard} flex min-h-[460px] items-center justify-center p-8 text-center text-slate-400 dark:text-slate-500`}><div><Database size={40} className="mx-auto mb-3 opacity-40" /><div className="font-semibold">Load a dataset to begin</div></div></div>}</div>
+          )}
+          {result ? (
+            mode === 1 ? (
+              <div className="space-y-5">
+                <div className={`${shellCard} p-5`}>
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                    <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-900/60"><div className="text-[10px] font-bold uppercase text-slate-400">Rows</div><div className="mt-1 font-mono text-sm font-semibold">{result.analysis?.rows ?? result.rows?.length ?? "—"}</div></div>
+                    <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-900/60"><div className="text-[10px] font-bold uppercase text-slate-400">Variables</div><div className="mt-1 font-mono text-sm font-semibold">{result.analysis?.variables ?? selectedColumns.length}</div></div>
+                    <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-900/60"><div className="text-[10px] font-bold uppercase text-slate-400">Forecast</div><div className="mt-1 text-sm font-semibold">{result.analysis?.fullForecastAvailable ? "Available" : "Not available"}</div></div>
+                    <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-900/60"><div className="text-[10px] font-bold uppercase text-slate-400">Tolerance</div><div className="mt-1 font-mono text-sm font-semibold">{safeNumber(result.analysis?.tolerancePct, 3)}%</div></div>
+                  </div>
+                </div>
+                <div className={`${shellCard} overflow-hidden`}>
+                  <div className="border-b border-slate-200 px-5 py-4 dark:border-slate-700"><h3 className="font-bold">Loaded multivariate trajectories</h3></div>
+                  <div className="h-[520px] p-2">
+                    <Plot data={Array.from({ length: selectedColumns.length }).map((_, j) => ({ x: (result.rows ?? []).map((_: number[], i: number) => i + 1), y: (result.rows ?? []).map((row: number[]) => row[j]), mode: "lines+markers", type: "scatter", name: activeGroup?.headers[selectedColumns[j]] ?? `Variable ${j + 1}` })).concat((result.analysis?.predictions ?? []).length ? Array.from({ length: selectedColumns.length }).map((_, j) => ({ x: (result.analysis.predictions ?? []).map((_: number[], i: number) => (result.rows ?? []).length + i + 1), y: (result.analysis.predictions ?? []).map((row: number[]) => row[j]), mode: "lines+markers", type: "scatter", name: `Forecast ${activeGroup?.headers[selectedColumns[j]] ?? j + 1}`, line: { dash: "dot" } })) : [])} layout={{ autosize: true, margin: { l: 60, r: 25, t: 30, b: 55 }, xaxis: { title: "row", gridcolor: dark ? "#334155" : "#e2e8f0" }, yaxis: { title: "value", gridcolor: dark ? "#334155" : "#e2e8f0" }, legend: { orientation: "h", y: 1.08 }, paper_bgcolor: dark ? "#1e293b" : "white", plot_bgcolor: dark ? "#1e293b" : "white", font: { color: dark ? "#e2e8f0" : "#1e293b" } }} style={{ width: "100%", height: "100%" }} useResizeHandler config={{ responsive: true, displaylogo: false }} />
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-5"><AnalysisSummary result={result} /><SequencePlot result={result} title="Loaded-data analysis" dark={dark} /></div>
+            )
+          ) : <div className={`${shellCard} flex min-h-[300px] items-center justify-center p-8 text-center text-slate-400 dark:text-slate-500`}><div><Database size={40} className="mx-auto mb-3 opacity-40" /><div className="font-semibold">Import and select a dataset to begin</div><p className="mt-1 text-sm">Choose a detected section and numeric columns, then analyse them.</p></div></div>}
+        </div>
       </div>
     </PageShell>
   );
@@ -1266,7 +1466,6 @@ function HomeScreen({ go }: { go: (screen: string) => void }) {
     { id: 'random', number: '7', title: 'Random / PRNG', desc: 'Analyze or generate native PRNG/LCG/xorshift/splitmix sequences.', icon: Binary },
     { id: 'curve', number: '8', title: 'Graph / Curve / Model Lab', desc: 'Polynomial, Fourier, damped-sinusoid, root-guided, symbolic and combined family fitting.', icon: LineChart },
     { id: 'selftest', number: '9', title: 'Self-Test / Benchmark', desc: 'Run the engine’s built-in correctness checks.', icon: TestTube2 },
-    { id: 'puzzle', number: '10', title: 'Puzzle / Cube Solver', desc: 'Generic permutation search and NxNxN cube moves.', icon: Boxes },
   ];
 
   return <div className="space-y-6 text-slate-900 dark:text-slate-100">
@@ -1275,9 +1474,9 @@ function HomeScreen({ go }: { go: (screen: string) => void }) {
         <div>
           <div className="text-xs font-bold uppercase tracking-[0.2em] text-blue-300">Engineering OS · Analyser</div>
           <h1 className="mt-2 text-3xl font-bold tracking-tight">Advanced Multivariate Sequence / Curve / Crypto Engine v6.0</h1>
-          <p className="mt-3 max-w-4xl text-sm leading-6 text-slate-300">One analyser section, ten native engine capabilities. Choose a method, move to its dedicated workspace, run the C++ implementation, and keep the rest of the application available through the existing ENG-OS navigation.</p>
+          <p className="mt-3 max-w-4xl text-sm leading-6 text-slate-300">One analyser section, nine native engine capabilities. Choose a method, move to its dedicated workspace, run the C++ implementation, and keep the rest of the application available through the existing ENG-OS navigation.</p>
         </div>
-        <div className="grid grid-cols-3 gap-2 text-center text-xs"><div className="rounded-xl bg-white/10 px-4 py-3"><div className="font-mono text-lg font-bold">10</div><div className="text-slate-300">engine modes</div></div><div className="rounded-xl bg-white/10 px-4 py-3"><div className="font-mono text-lg font-bold">30+</div><div className="text-slate-300">curve families</div></div><div className="rounded-xl bg-white/10 px-4 py-3"><div className="font-mono text-lg font-bold">C++</div><div className="text-slate-300">source of truth</div></div></div>
+        <div className="grid grid-cols-3 gap-2 text-center text-xs"><div className="rounded-xl bg-white/10 px-4 py-3"><div className="font-mono text-lg font-bold">9</div><div className="text-slate-300">engine modes</div></div><div className="rounded-xl bg-white/10 px-4 py-3"><div className="font-mono text-lg font-bold">30+</div><div className="text-slate-300">curve families</div></div><div className="rounded-xl bg-white/10 px-4 py-3"><div className="font-mono text-lg font-bold">C++</div><div className="text-slate-300">source of truth</div></div></div>
       </div>
     </div>
 
