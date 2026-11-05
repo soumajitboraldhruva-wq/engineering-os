@@ -2,15 +2,55 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
+import re
 import tempfile
 from typing import Any
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 router = APIRouter()
 
+
+_XY_NUMBER_RE = re.compile(r"(?<![A-Za-z0-9_.])[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?")
+_XY_LABEL_RE = re.compile(r"\b(?:x|y|time|value|index)\b\s*=?\s*", re.IGNORECASE)
+
+
+def _normalize_xy_pairs(text: str) -> str:
+    """Validate and normalise pasted curve rows before passing them to C++."""
+    points: list[tuple[float, float]] = []
+    for line_number, raw_line in enumerate(text.lstrip("\ufeff").splitlines(), start=1):
+        line = raw_line.split("#", 1)[0].strip()
+        if not line or line.startswith("//"):
+            continue
+        numeric_text = _XY_LABEL_RE.sub(" ", line)
+        # A remaining word indicates a heading/annotation, not a measurement.
+        if re.search(r"[A-Za-z_]", numeric_text):
+            if not points:
+                continue
+            raise ValueError(f"Row {line_number}: expected exactly two numeric values (x and y).")
+        tokens = _XY_NUMBER_RE.findall(numeric_text)
+        if not tokens:
+            if not points:
+                continue
+            raise ValueError(f"Row {line_number}: no numeric x-y pair was found.")
+        if len(tokens) != 2:
+            raise ValueError(f"Row {line_number}: expected exactly two numeric values, found {len(tokens)}.")
+        x_value, y_value = map(float, tokens)
+        if not (math.isfinite(x_value) and math.isfinite(y_value)):
+            raise ValueError(f"Row {line_number}: x and y must be finite numbers.")
+        points.append((x_value, y_value))
+
+    if len(points) < 3:
+        raise ValueError("Enter at least three valid x-y pairs.")
+    ordered_x = sorted(x for x, _ in points)
+    for left, right in zip(ordered_x, ordered_x[1:]):
+        if math.isclose(left, right, rel_tol=0.0, abs_tol=1e-15):
+            raise ValueError("Duplicate x values are not supported. Each x value must be unique.")
+
+    return "\n".join(f"{x:.17g} {y:.17g}" for x, y in points)
 
 def _tol_arg(tolerance: float | None) -> str:
     # Keep the native protocol backward compatible: -1 means adaptive/automatic.
@@ -64,8 +104,13 @@ class SequenceRequest(BaseModel):
 class CurveRequest(BaseModel):
     pairs: str = Field(min_length=1)
     horizon: int = Field(default=4, ge=1, le=1000)
-    tolerance: float | None = Field(default=None, ge=-1.0, le=100.0)
-    step: float = Field(default=1.0, gt=0.0)
+    tolerance: float | None = Field(default=None, ge=-1.0, le=100.0, allow_inf_nan=False)
+    step: float = Field(default=1.0, gt=0.0, le=1_000_000.0, allow_inf_nan=False)
+
+    @field_validator("pairs")
+    @classmethod
+    def validate_pairs(cls, value: str) -> str:
+        return _normalize_xy_pairs(value)
 
 
 class MultivariateRequest(BaseModel):
@@ -97,10 +142,15 @@ class FamilyFitRequest(BaseModel):
     pairs: str = Field(min_length=1)
     family: str = Field(min_length=1)
     degree: int = Field(default=1, ge=1, le=18)
-    param: float = 0.0
-    param2: float = 0.0
+    param: float = Field(default=0.0, allow_inf_nan=False)
+    param2: float = Field(default=0.0, allow_inf_nan=False)
     horizon: int = Field(default=4, ge=1, le=1000)
-    step: float = Field(default=1.0, gt=0.0)
+    step: float = Field(default=1.0, gt=0.0, le=1_000_000.0, allow_inf_nan=False)
+
+    @field_validator("pairs")
+    @classmethod
+    def validate_pairs(cls, value: str) -> str:
+        return _normalize_xy_pairs(value)
 
 
 class CipherRequest(BaseModel):
