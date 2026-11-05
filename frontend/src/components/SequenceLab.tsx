@@ -101,6 +101,15 @@ const safeNumber = (value: unknown, digits = 4) => {
   return Number.isFinite(n) ? n.toFixed(digits) : '—';
 };
 
+function requestErrorMessage(error: any, fallback: string): string {
+  const detail = error?.response?.data?.detail;
+  if (Array.isArray(detail)) {
+    return detail.map((item: any) => item?.msg || String(item)).join('; ');
+  }
+  if (typeof detail === 'string' && detail.trim()) return detail;
+  return error?.message || fallback;
+}
+
 // ----------------------------------------------------------------------
 // Flexible data-entry helpers.
 //
@@ -753,11 +762,12 @@ function CurveScreen({ go, dark }: { go: (screen: string) => void; dark: boolean
 
   const analyze = async () => {
     setLoading(true);
+    setResult(null);
     try {
       const { data: payload } = await axios.post(`${API}/curve`, { pairs: normalizedPairs(), horizon, tolerance, step });
       setResult(payload);
     } catch (error: any) {
-      alert(error.response?.data?.detail ?? 'Curve analysis failed.');
+      alert(requestErrorMessage(error, 'Curve analysis failed.'));
     } finally {
       setLoading(false);
     }
@@ -765,12 +775,13 @@ function CurveScreen({ go, dark }: { go: (screen: string) => void; dark: boolean
 
   const compareFamilies = async () => {
     setFamilyLoading(true);
+    setFamilies(null);
     try {
       const { data: payload } = await axios.post(`${API}/families`, { pairs: normalizedPairs(), horizon, tolerance, step });
       setFamilies(payload.families ?? []);
       setFamilyFilter('');
     } catch (error: any) {
-      alert(error.response?.data?.detail ?? 'Family sweep failed.');
+      alert(requestErrorMessage(error, 'Family sweep failed.'));
     } finally {
       setFamilyLoading(false);
     }
@@ -782,6 +793,7 @@ function CurveScreen({ go, dark }: { go: (screen: string) => void; dark: boolean
     const selectedParam = override?.param ?? param;
     const selectedParam2 = override?.param2 ?? param2;
     setFamilyLoading(true);
+    setFamilyFit(null);
     try {
       const { data: payload } = await axios.post(`${API}/family`, {
         pairs: normalizedPairs(),
@@ -794,7 +806,7 @@ function CurveScreen({ go, dark }: { go: (screen: string) => void; dark: boolean
       });
       setFamilyFit(payload);
     } catch (error: any) {
-      alert(error.response?.data?.detail ?? 'Family fit failed.');
+      alert(requestErrorMessage(error, 'Family fit failed.'));
     } finally {
       setFamilyLoading(false);
     }
@@ -930,8 +942,7 @@ function CurveScreen({ go, dark }: { go: (screen: string) => void; dark: boolean
     </PageShell>
   );
 }
-
-function MultivariateScreen({ go, dark }: { go: (screen: string) => void; dark: boolean }) {
+: string) => void; dark: boolean }) {
   const [variables, setVariables] = useState(3);
   const [rows, setRows] = useState('4 8 12\n5 10 15\n6 12 18\n7 14 21\n8 16 24\n9 18 27\n10 20 30\n11 22 33\n12 24 36\n13 26 39\n14 28 42\n15 30 45');
   const [layout, setLayout] = useState<Layout>('rows');
