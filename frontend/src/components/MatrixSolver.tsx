@@ -99,6 +99,15 @@ const functionButtons = [
   ['y', ''], ['z', ''],
 ];
 
+function resizeMatrix(matrix: Matrix, rows: number, columns: number): Matrix {
+  return Array.from({ length: rows }, (_, r) =>
+    Array.from({ length: columns }, (_, c) => matrix[r]?.[c] ?? '0')
+  );
+}
+
+function resizeVector(vector: Vector, size: number): Vector {
+  return Array.from({ length: size }, (_, i) => vector[i] ?? '0');
+}
 function zeros(rows: number, cols: number): Matrix {
   return Array.from({ length: rows }, () => Array.from({ length: cols }, () => '0'));
 }
@@ -279,7 +288,8 @@ export default function MatrixSolver() {
   const [columns, setColumns] = useState(3);
   const [matrixA, setMatrixA] = useState<Matrix>(zeros(3, 3));
   const [vectorB, setVectorB] = useState<Vector>(zeroVector(3));
-  const [matrixB, setMatrixB] = useState<Matrix>(zeros(3, 3));
+  const [bColumns, setBColumns] = useState(2);
+  const [matrixB, setMatrixB] = useState<Matrix>(zeros(3, 2));
   const [operation, setOperation] = useState<Operation>('solve');
   const [power, setPower] = useState(2);
   const [variable, setVariable] = useState('x');
@@ -301,12 +311,13 @@ export default function MatrixSolver() {
   const selected = useMemo(() => operations.find((item) => item.id === operation)!, [operation]);
 
   useEffect(() => {
-    setMatrixA(zeros(rows, columns));
-    setVectorB(zeroVector(rows));
-    setMatrixB(zeros(columns, rows));
+    // Resizing should preserve existing cells instead of wiping the user's work.
+    setMatrixA((current) => resizeMatrix(current, rows, columns));
+    setVectorB((current) => resizeVector(current, rows));
+    setMatrixB((current) => resizeMatrix(current, columns, bColumns));
     setResult(null);
     setError(null);
-  }, [rows, columns]);
+  }, [rows, columns, bColumns]);
 
   useEffect(() => {
     checkHealth();
@@ -341,7 +352,9 @@ export default function MatrixSolver() {
     setColumns(example.A[0]?.length || 1);
     setMatrixA(example.A.map((row) => [...row]));
     setVectorB(example.b ? [...example.b] : zeroVector(example.A.length));
-    setMatrixB(example.B ? example.B.map((row) => [...row]) : zeros(example.A[0]?.length || 1, example.A.length));
+    const nextB = example.B ? example.B.map((row) => [...row]) : zeros(example.A[0]?.length || 1, bColumns);
+    setBColumns(example.B?.[0]?.length || bColumns);
+    setMatrixB(nextB);
     if (example.power !== undefined) setPower(example.power);
     setResult(null);
     setError(null);
@@ -358,7 +371,12 @@ export default function MatrixSolver() {
       body: JSON.stringify(body),
     });
     const data = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
-    if (!response.ok || data.error) throw new Error(data.error || data.detail || `HTTP ${response.status}`);
+    if (!response.ok || data.error) {
+      const detail = Array.isArray(data.detail)
+        ? data.detail.map((item: any) => item.msg || JSON.stringify(item)).join('; ')
+        : data.detail;
+      throw new Error(data.error || detail || `HTTP ${response.status}`);
+    }
     setOnline(true);
     return data;
   }
@@ -473,8 +491,8 @@ export default function MatrixSolver() {
           </div>
         </header>
 
-        <div className="grid grid-cols-1 gap-3 lg:grid-cols-[250px_minmax(0,1fr)_350px]">
-          <aside className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+        <div className="grid grid-cols-1 gap-3 xl:grid-cols-[210px_minmax(0,1fr)] 2xl:grid-cols-[210px_minmax(0,1fr)_310px]">
+          <aside className="max-h-[32vh] overflow-y-auto rounded-2xl border border-slate-200 bg-white p-3 shadow-sm dark:border-slate-800 dark:bg-slate-900 xl:sticky xl:top-3 xl:max-h-[calc(100vh-1.5rem)]">
             <div className="mb-3 px-2">
               <div className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Operations</div>
               <div className="mt-1 text-xs text-slate-500">Choose what the matrix workspace should do.</div>
@@ -515,6 +533,7 @@ export default function MatrixSolver() {
                   <label className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Rows<input type="number" min={1} max={50} value={rows} onChange={(e) => setRows(Math.max(1, Math.min(50, Number(e.target.value) || 1)))} className="mt-1 block w-20 rounded-lg border border-slate-300 bg-white px-2 py-2 text-sm dark:border-slate-700 dark:bg-slate-950" /></label>
                   <label className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Columns<input type="number" min={1} max={50} value={columns} onChange={(e) => setColumns(Math.max(1, Math.min(50, Number(e.target.value) || 1)))} className="mt-1 block w-20 rounded-lg border border-slate-300 bg-white px-2 py-2 text-sm dark:border-slate-700 dark:bg-slate-950" /></label>
                   <label className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Tolerance<input type="number" step="any" value={tolerance} onChange={(e) => setTolerance(Number(e.target.value) || 1e-10)} className="mt-1 block w-28 rounded-lg border border-slate-300 bg-white px-2 py-2 text-sm dark:border-slate-700 dark:bg-slate-950" /></label>
+                  {operation === 'multiply' && <label className="text-[10px] font-bold uppercase tracking-wide text-slate-400">B columns<input type="number" min={1} max={50} value={bColumns} onChange={(e) => setBColumns(Math.max(1, Math.min(50, Number(e.target.value) || 1)))} className="mt-1 block w-24 rounded-lg border border-slate-300 bg-white px-2 py-2 text-sm dark:border-slate-700 dark:bg-slate-950" /></label>}
                   {operation === 'power' && <label className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Power n<input type="number" min={-100} max={100} value={power} onChange={(e) => setPower(Number(e.target.value))} className="mt-1 block w-24 rounded-lg border border-slate-300 bg-white px-2 py-2 text-sm dark:border-slate-700 dark:bg-slate-950" /></label>}
                 </div>
               )}

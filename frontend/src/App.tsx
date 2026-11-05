@@ -5,7 +5,6 @@ import {
   LineChart,
   Settings,
   TrendingUp,
-  Box,
 } from 'lucide-react'
 
 import CalcModule from './components/Calculator';
@@ -13,7 +12,6 @@ import MatrixModule from './components/MatrixSolver';
 import ODESolver from './components/ODESolver';
 import GraphingModule from './components/Graphing';
 import SequenceLab from './components/SequenceLab';
-import CubeSolver from './components/CubeSolver';
 
 const navButtonClass = (active: boolean) =>
   `flex w-full items-center rounded-xl p-3 text-left text-sm font-medium transition-colors ${
@@ -24,8 +22,8 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('calc');
 
   return (
-    <div className="flex h-screen bg-slate-100 font-sans text-slate-900">
-      <aside className="flex w-64 shrink-0 flex-col bg-slate-950 text-white">
+    <div className="flex min-h-screen bg-slate-100 font-sans text-slate-900">
+      <aside className="hidden w-56 shrink-0 flex-col bg-slate-950 text-white md:flex">
         <div className="border-b border-slate-800 p-5">
           <div className="text-2xl font-bold tracking-wider">
             ENG-OS <span className="ml-1 text-sm text-blue-400">v0.1</span>
@@ -63,13 +61,6 @@ export default function App() {
             Advanced Analyser
           </button>
 
-          <div className="mb-2 ml-2 mt-7 text-[11px] font-bold uppercase tracking-wider text-slate-500">
-            Puzzles
-          </div>
-          <button type="button" onClick={() => setActiveTab('cube')} className={navButtonClass(activeTab === 'cube')}>
-            <Box className="mr-3" size={19} />
-            Cube Solver
-          </button>
         </nav>
 
         <div className="border-t border-slate-800 p-4">
@@ -80,14 +71,31 @@ export default function App() {
         </div>
       </aside>
 
-      <main className="min-w-0 flex-1 overflow-auto bg-slate-50 p-6 lg:p-8">
+      <main className="min-w-0 flex-1 overflow-auto bg-slate-50 p-3 sm:p-5 lg:p-8">
+        <div className="mb-3 flex gap-2 overflow-x-auto md:hidden">
+          {[
+            ['calc', 'Scientific'],
+            ['graph', 'Graphing'],
+            ['matrix', 'Linear Algebra'],
+            ['sequence', 'Advanced Analyser'],
+            ['ode', 'Differential Equations'],
+          ].map(([id, label]) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => setActiveTab(id)}
+              className={`shrink-0 rounded-xl px-3 py-2 text-xs font-semibold transition ${activeTab === id ? 'bg-blue-600 text-white' : 'border border-slate-200 bg-white text-slate-700'}`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
         <div className="mx-auto w-full max-w-[1700px]">
           {activeTab === 'calc' && <CalcModule />}
           {activeTab === 'graph' && <GraphingModule />}
           {activeTab === 'matrix' && <MatrixModule />}
           {activeTab === 'sequence' && <SequenceLab />}
           {activeTab === 'ode' && <ODESolver />}
-          {activeTab === 'cube' && <CubeSolver />}
         </div>
       </main>
     </div>
