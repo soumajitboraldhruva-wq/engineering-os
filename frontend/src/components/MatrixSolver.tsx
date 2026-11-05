@@ -492,7 +492,7 @@ export default function MatrixSolver() {
         </header>
 
         <div className="grid grid-cols-1 gap-3 xl:grid-cols-[210px_minmax(0,1fr)] 2xl:grid-cols-[210px_minmax(0,1fr)_310px]">
-          <aside className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+          <aside className="max-h-[32vh] overflow-y-auto rounded-2xl border border-slate-200 bg-white p-3 shadow-sm dark:border-slate-800 dark:bg-slate-900 xl:sticky xl:top-3 xl:max-h-[calc(100vh-1.5rem)]">
             <div className="mb-3 px-2">
               <div className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Operations</div>
               <div className="mt-1 text-xs text-slate-500">Choose what the matrix workspace should do.</div>
