@@ -1,19 +1,19 @@
-import { useState } from 'react';
+import { useState } from 'react'
 import {
-  Activity,
   Calculator,
   Grid3x3,
-  Library,
   LineChart,
   Settings,
   TrendingUp,
-} from 'lucide-react';
+  Box,
+} from 'lucide-react'
 
 import CalcModule from './components/Calculator';
 import MatrixModule from './components/MatrixSolver';
 import ODESolver from './components/ODESolver';
 import GraphingModule from './components/Graphing';
 import SequenceLab from './components/SequenceLab';
+import CubeSolver from './components/CubeSolver';
 
 const navButtonClass = (active: boolean) =>
   `flex w-full items-center rounded-xl p-3 text-left text-sm font-medium transition-colors ${
@@ -64,18 +64,12 @@ export default function App() {
           </button>
 
           <div className="mb-2 ml-2 mt-7 text-[11px] font-bold uppercase tracking-wider text-slate-500">
-            Engineering
+            Puzzles
           </div>
-          <div className="space-y-1.5">
-            <button type="button" onClick={() => setActiveTab('ode')} className={navButtonClass(activeTab === 'ode')}>
-              <Activity className="mr-3" size={19} />
-              ODE / Dynamics
-            </button>
-            <button type="button" className="flex w-full cursor-not-allowed items-center rounded-xl p-3 text-left text-sm font-medium text-slate-500 hover:bg-slate-900">
-              <Library className="mr-3" size={19} />
-              Mechanics (Soon)
-            </button>
-          </div>
+          <button type="button" onClick={() => setActiveTab('cube')} className={navButtonClass(activeTab === 'cube')}>
+            <Box className="mr-3" size={19} />
+            Cube Solver
+          </button>
         </nav>
 
         <div className="border-t border-slate-800 p-4">
@@ -93,6 +87,7 @@ export default function App() {
           {activeTab === 'matrix' && <MatrixModule />}
           {activeTab === 'sequence' && <SequenceLab />}
           {activeTab === 'ode' && <ODESolver />}
+          {activeTab === 'cube' && <CubeSolver />}
         </div>
       </main>
     </div>
