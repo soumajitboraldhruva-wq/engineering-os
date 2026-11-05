@@ -147,15 +147,15 @@ function transposeRagged(matrix: number[][]): number[][] {
 type ImportedDataGroup = { id: string; title: string; headers: string[]; rows: number[][] };
 
 function splitImportLine(line: string, delimiter: string): string[] {
-  if (delimiter === " ") return line.trim().split(/\\s+/);
+  if (delimiter === ' ') return line.trim().split(/\s+/);
   const cells: string[] = [];
-  let cell = "";
+  let cell = '';
   let quoted = false;
   for (let i = 0; i < line.length; i += 1) {
     const char = line[i];
     if (char === '"' && quoted && line[i + 1] === '"') { cell += '"'; i += 1; }
     else if (char === '"') quoted = !quoted;
-    else if (char === delimiter && !quoted) { cells.push(cell.trim()); cell = ""; }
+    else if (char === delimiter && !quoted) { cells.push(cell.trim()); cell = ''; }
     else cell += char;
   }
   cells.push(cell.trim());
@@ -163,57 +163,96 @@ function splitImportLine(line: string, delimiter: string): string[] {
 }
 
 function parseImportedDataset(text: string): ImportedDataGroup[] {
-  const lines = text.replace(/^\\uFEFF/, "").split(/\\r?\\n/);
-  const meaningful = lines.map((line) => line.trim()).filter((line) => line && !line.startsWith("#") && !line.startsWith("//"));
+  const lines = text.replace(/^\uFEFF/, '').split(/\r?\n/);
+  const meaningful = lines.map((line) => line.trim()).filter((line) => line && !line.startsWith('#') && !line.startsWith('//'));
   if (!meaningful.length) return [];
-  const sample = meaningful.slice(0, 12).join("\\n");
-  const counts = [",", "\\t", ";"].map((delimiter) => ({ delimiter, count: (sample.match(new RegExp(delimiter === "\\t" ? "\\t" : `\\${delimiter}`, "g")) ?? []).length }));
-  const best = counts.sort((a, b) => b.count - a.count)[0];
-  const delimiter = best.count > 0 ? best.delimiter : " ";
+
+  const sample = meaningful.slice(0, 12).join('\n');
+  const delimiterCandidates = [',', '\t', ';'].map((delimiter) => ({
+    delimiter,
+    count: sample.split(delimiter).length - 1,
+  }));
+  const best = delimiterCandidates.sort((a, b) => b.count - a.count)[0];
+  const delimiter = best.count > 0 ? best.delimiter : ' ';
   const groups: ImportedDataGroup[] = [];
-  let current: ImportedDataGroup = { id: "section-1", title: "Dataset", headers: [], rows: [] };
   let sectionNumber = 1;
+  let current: ImportedDataGroup = { id: 'section-1', title: 'Dataset', headers: [], rows: [] };
+
   const beginSection = (title?: string) => {
     if (current.rows.length || current.headers.length) groups.push(current);
     sectionNumber += 1;
-    current = { id: `section-${sectionNumber}`, title: title?.trim() || `Dataset ${sectionNumber}`, headers: [], rows: [] };
+    current = {
+      id: 'section-' + sectionNumber,
+      title: title?.trim() || 'Dataset ' + sectionNumber,
+      headers: [],
+      rows: [],
+    };
   };
+
   for (const raw of lines) {
     const line = raw.trim();
-    if (!line || line.startsWith("#") || line.startsWith("//")) continue;
+    if (!line || line.startsWith('#') || line.startsWith('//')) continue;
     const cells = splitImportLine(line, delimiter);
     if (!cells.length || cells.every((cell) => !cell)) continue;
-    const numeric = cells.map((cell) => cell === "" ? Number.NaN : Number(cell));
-    const allNumeric = cells.every((cell, index) => cell !== "" && Number.isFinite(numeric[index]));
-    const hasText = cells.some((cell, index) => cell !== "" && !Number.isFinite(numeric[index]));
-    if (cells.length === 1 && hasText) {
+
+    const numeric = cells.map((cell) => {
+      const cleaned = cell.trim();
+      if (!cleaned || /^(?:na|n\/a|null|nan|--|-)$/i.test(cleaned)) return Number.NaN;
+      const parsed = Number(cleaned);
+      return Number.isFinite(parsed) ? parsed : Number.NaN;
+    });
+    const nonNumericText = cells.some((cell, index) =>
+      cell.trim() !== '' &&
+      !/^(?:na|n\/a|null|nan|--|-)$/i.test(cell.trim()) &&
+      !Number.isFinite(numeric[index])
+    );
+    const hasNumeric = numeric.some(Number.isFinite);
+
+    // A single non-numeric cell is a section title (e.g. "Experiment 2").
+    if (cells.length === 1 && nonNumericText) {
       if (current.rows.length || current.headers.length) beginSection(cells[0]);
       else current.title = cells[0];
       continue;
     }
-    if (hasText) {
-      const header = cells.map((cell, index) => cell || `Column ${index + 1}`);
-      if (current.rows.length) beginSection();
-      current.headers = header;
+
+    // A row containing numeric measurements is data even when it also has
+    // a date, timestamp or other textual identifier column. Such columns
+    // remain visible but are not offered as numeric variables.
+    if (hasNumeric) {
+      if (!current.headers.length) {
+        current.headers = cells.map((_, index) => 'Column ' + (index + 1));
+      }
+      if (cells.length > current.headers.length) {
+        for (let i = current.headers.length; i < cells.length; i += 1) {
+          current.headers.push('Column ' + (i + 1));
+        }
+      }
+      current.rows.push(
+        Array.from({ length: current.headers.length }, (_, index) => numeric[index] ?? Number.NaN)
+      );
       continue;
     }
-    if (!allNumeric) continue;
-    if (!current.headers.length) current.headers = cells.map((_, index) => `Column ${index + 1}`);
-    if (cells.length > current.headers.length) {
-      for (let i = current.headers.length; i < cells.length; i += 1) current.headers.push(`Column ${i + 1}`);
+
+    // Entirely textual rows are table headings. Repeated headings begin a
+    // separate detected group instead of being swallowed as numeric data.
+    if (nonNumericText) {
+      const header = cells.map((cell, index) => cell || 'Column ' + (index + 1));
+      if (current.rows.length) beginSection();
+      current.headers = header;
     }
-    const row = Array.from({ length: current.headers.length }, (_, index) => numeric[index] ?? Number.NaN);
-    current.rows.push(row);
   }
+
   if (current.rows.length || current.headers.length) groups.push(current);
   return groups
-    .filter((group) => group.rows.some((row) => row.some((value) => Number.isFinite(value))))
-    .map((group, index) => ({ ...group, id: `section-${index + 1}` }));
+    .filter((group) => group.rows.some((row) => row.some(Number.isFinite)))
+    .map((group, index) => ({ ...group, id: 'section-' + (index + 1) }));
 }
 
 function numericColumns(group?: ImportedDataGroup): number[] {
   if (!group) return [];
-  return group.headers.map((_, index) => index).filter((index) => group.rows.some((row) => Number.isFinite(row[index])));
+  return group.headers
+    .map((_, index) => index)
+    .filter((index) => group.rows.some((row) => Number.isFinite(row[index])));
 }
 
 type Layout = 'rows' | 'columns';
@@ -1098,10 +1137,11 @@ function FileScreen({ go, dark }: { go: (screen: string) => void; dark: boolean 
   };
 
   const selectGroup = (index: number) => {
+    const nextColumns = numericColumns(groups[index]);
     setGroupIndex(index);
-    setSelectedColumns(numericColumns(groups[index]));
-    setXColumn(columns[0] ?? 0);
-    setYColumn(columns[1] ?? columns[0] ?? 0);
+    setSelectedColumns(nextColumns);
+    setXColumn(nextColumns[0] ?? 0);
+    setYColumn(nextColumns[1] ?? nextColumns[0] ?? 0);
     setResult(null);
     setError("");
   };
