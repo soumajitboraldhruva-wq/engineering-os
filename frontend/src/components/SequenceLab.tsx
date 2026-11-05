@@ -192,8 +192,9 @@ function parseImportedDataset(text: string): ImportedDataGroup[] {
   for (const raw of lines) {
     const line = raw.trim();
     if (!line || line.startsWith('#') || line.startsWith('//')) continue;
-    if (delimiter === ' ' && current.rows.length && /^(?:section|dataset|experiment|trial|run|sheet|group)\\b/i.test(line)) {
-      beginSection(line);
+    if (delimiter === ' ' && /^(?:section|dataset|experiment|trial|run|sheet|group)\b/i.test(line)) {
+      if (current.rows.length || current.headers.length) beginSection(line);
+      else current.title = line;
       continue;
     }
     const cells = splitImportLine(line, delimiter);
