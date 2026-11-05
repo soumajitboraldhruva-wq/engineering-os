@@ -27,7 +27,7 @@ def _normalize_xy_pairs(text: str) -> str:
             continue
         numeric_text = _XY_LABEL_RE.sub(" ", line)
         # A remaining word indicates a heading/annotation, not a measurement.
-        if re.search(r"[A-Za-z_]", numeric_text):
+        if re.search(r"[A-DF-Za-df-z_]", numeric_text):
             if not points:
                 continue
             raise ValueError(f"Row {line_number}: expected exactly two numeric values (x and y).")
