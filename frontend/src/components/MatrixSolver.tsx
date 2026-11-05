@@ -99,6 +99,15 @@ const functionButtons = [
   ['y', ''], ['z', ''],
 ];
 
+function resizeMatrix(matrix: Matrix, rows: number, columns: number): Matrix {
+  return Array.from({ length: rows }, (_, r) =>
+    Array.from({ length: columns }, (_, c) => matrix[r]?.[c] ?? '0')
+  );
+}
+
+function resizeVector(vector: Vector, size: number): Vector {
+  return Array.from({ length: size }, (_, i) => vector[i] ?? '0');
+}
 function zeros(rows: number, cols: number): Matrix {
   return Array.from({ length: rows }, () => Array.from({ length: cols }, () => '0'));
 }
@@ -301,9 +310,10 @@ export default function MatrixSolver() {
   const selected = useMemo(() => operations.find((item) => item.id === operation)!, [operation]);
 
   useEffect(() => {
-    setMatrixA(zeros(rows, columns));
-    setVectorB(zeroVector(rows));
-    setMatrixB(zeros(columns, rows));
+    // Resizing should preserve existing cells instead of wiping the user's work.
+    setMatrixA((current) => resizeMatrix(current, rows, columns));
+    setVectorB((current) => resizeVector(current, rows));
+    setMatrixB((current) => resizeMatrix(current, columns, rows));
     setResult(null);
     setError(null);
   }, [rows, columns]);
@@ -358,7 +368,12 @@ export default function MatrixSolver() {
       body: JSON.stringify(body),
     });
     const data = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
-    if (!response.ok || data.error) throw new Error(data.error || data.detail || `HTTP ${response.status}`);
+    if (!response.ok || data.error) {
+      const detail = Array.isArray(data.detail)
+        ? data.detail.map((item: any) => item.msg || JSON.stringify(item)).join('; ')
+        : data.detail;
+      throw new Error(data.error || detail || `HTTP ${response.status}`);
+    }
     setOnline(true);
     return data;
   }
@@ -473,7 +488,7 @@ export default function MatrixSolver() {
           </div>
         </header>
 
-        <div className="grid grid-cols-1 gap-3 lg:grid-cols-[250px_minmax(0,1fr)_350px]">
+        <div className="grid grid-cols-1 gap-3 xl:grid-cols-[210px_minmax(0,1fr)] 2xl:grid-cols-[210px_minmax(0,1fr)_310px]">
           <aside className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm dark:border-slate-800 dark:bg-slate-900">
             <div className="mb-3 px-2">
               <div className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Operations</div>
