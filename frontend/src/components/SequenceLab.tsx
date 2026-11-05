@@ -1315,6 +1315,52 @@ function FileScreen({ go, dark }: { go: (screen: string) => void; dark: boolean 
                   </div>
                 </div>
               </div>
+            ) : mode >= 2 ? (
+              <div className="space-y-5">
+                <AnalysisSummary result={result} />
+                <div className={`${shellCard} overflow-hidden`}>
+                  <div className="border-b border-slate-200 px-5 py-4 dark:border-slate-700">
+                    <h3 className="font-bold">{result.is3D ? "3D coordinate geometry" : "2D coordinate geometry"}</h3>
+                    <p className="mt-1 text-xs text-slate-500">Plot uses the imported coordinates after the selected coordinate transformation.</p>
+                  </div>
+                  <div className="h-[520px] p-2">
+                    {result.is3D ? (
+                      <Plot data={[{
+                        x: (result.points ?? []).map((point: AnyRecord) => point.x),
+                        y: (result.points ?? []).map((point: AnyRecord) => point.y),
+                        z: (result.points ?? []).map((point: AnyRecord) => point.z),
+                        mode: "markers+lines",
+                        type: "scatter3d",
+                        name: "Imported coordinates",
+                        marker: { size: 4 },
+                      }]} layout={{
+                        autosize: true,
+                        margin: { l: 0, r: 0, t: 30, b: 0 },
+                        scene: { xaxis: { title: "X" }, yaxis: { title: "Y" }, zaxis: { title: "Z" } },
+                        paper_bgcolor: dark ? "#1e293b" : "white",
+                        font: { color: dark ? "#e2e8f0" : "#1e293b" },
+                      }} style={{ width: "100%", height: "100%" }} useResizeHandler config={{ responsive: true, displaylogo: false }} />
+                    ) : (
+                      <Plot data={[{
+                        x: (result.points ?? []).map((point: AnyRecord) => point.x),
+                        y: (result.points ?? []).map((point: AnyRecord) => point.y),
+                        mode: "markers+lines",
+                        type: "scatter",
+                        name: "Imported coordinates",
+                        marker: { size: 7 },
+                      }]} layout={{
+                        autosize: true,
+                        margin: { l: 60, r: 25, t: 30, b: 55 },
+                        xaxis: { title: "X", gridcolor: dark ? "#334155" : "#e2e8f0" },
+                        yaxis: { title: "Y", gridcolor: dark ? "#334155" : "#e2e8f0" },
+                        paper_bgcolor: dark ? "#1e293b" : "white",
+                        plot_bgcolor: dark ? "#1e293b" : "white",
+                        font: { color: dark ? "#e2e8f0" : "#1e293b" },
+                      }} style={{ width: "100%", height: "100%" }} useResizeHandler config={{ responsive: true, displaylogo: false }} />
+                    )}
+                  </div>
+                </div>
+              </div>
             ) : (
               <div className="space-y-5"><AnalysisSummary result={result} /><SequencePlot result={result} title="Loaded-data analysis" dark={dark} /></div>
             )
