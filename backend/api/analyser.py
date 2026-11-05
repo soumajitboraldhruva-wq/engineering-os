@@ -9,7 +9,7 @@ import tempfile
 from typing import Any
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 router = APIRouter()
 
@@ -152,6 +152,19 @@ class FamilyFitRequest(BaseModel):
     @classmethod
     def validate_pairs(cls, value: str) -> str:
         return _normalize_xy_pairs(value)
+
+    @model_validator(mode="after")
+    def validate_family_degree(self):
+        point_count = len(self.pairs.splitlines())
+        if self.family in {"poly", "chebyshev"} and self.degree + 1 > point_count:
+            raise ValueError(
+                f"Degree {self.degree} needs at least {self.degree + 1} distinct x-y points."
+            )
+        if self.family == "taylor" and self.degree + 2 > point_count:
+            raise ValueError(
+                f"Taylor order {self.degree} needs at least {self.degree + 2} x-y points."
+            )
+        return self
 
 
 class CipherRequest(BaseModel):
