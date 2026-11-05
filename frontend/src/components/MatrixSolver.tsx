@@ -288,7 +288,8 @@ export default function MatrixSolver() {
   const [columns, setColumns] = useState(3);
   const [matrixA, setMatrixA] = useState<Matrix>(zeros(3, 3));
   const [vectorB, setVectorB] = useState<Vector>(zeroVector(3));
-  const [matrixB, setMatrixB] = useState<Matrix>(zeros(3, 3));
+  const [bColumns, setBColumns] = useState(2);
+  const [matrixB, setMatrixB] = useState<Matrix>(zeros(3, 2));
   const [operation, setOperation] = useState<Operation>('solve');
   const [power, setPower] = useState(2);
   const [variable, setVariable] = useState('x');
@@ -313,10 +314,10 @@ export default function MatrixSolver() {
     // Resizing should preserve existing cells instead of wiping the user's work.
     setMatrixA((current) => resizeMatrix(current, rows, columns));
     setVectorB((current) => resizeVector(current, rows));
-    setMatrixB((current) => resizeMatrix(current, columns, rows));
+    setMatrixB((current) => resizeMatrix(current, columns, bColumns));
     setResult(null);
     setError(null);
-  }, [rows, columns]);
+  }, [rows, columns, bColumns]);
 
   useEffect(() => {
     checkHealth();
@@ -351,7 +352,9 @@ export default function MatrixSolver() {
     setColumns(example.A[0]?.length || 1);
     setMatrixA(example.A.map((row) => [...row]));
     setVectorB(example.b ? [...example.b] : zeroVector(example.A.length));
-    setMatrixB(example.B ? example.B.map((row) => [...row]) : zeros(example.A[0]?.length || 1, example.A.length));
+    const nextB = example.B ? example.B.map((row) => [...row]) : zeros(example.A[0]?.length || 1, bColumns);
+    setBColumns(example.B?.[0]?.length || bColumns);
+    setMatrixB(nextB);
     if (example.power !== undefined) setPower(example.power);
     setResult(null);
     setError(null);
@@ -530,6 +533,7 @@ export default function MatrixSolver() {
                   <label className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Rows<input type="number" min={1} max={50} value={rows} onChange={(e) => setRows(Math.max(1, Math.min(50, Number(e.target.value) || 1)))} className="mt-1 block w-20 rounded-lg border border-slate-300 bg-white px-2 py-2 text-sm dark:border-slate-700 dark:bg-slate-950" /></label>
                   <label className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Columns<input type="number" min={1} max={50} value={columns} onChange={(e) => setColumns(Math.max(1, Math.min(50, Number(e.target.value) || 1)))} className="mt-1 block w-20 rounded-lg border border-slate-300 bg-white px-2 py-2 text-sm dark:border-slate-700 dark:bg-slate-950" /></label>
                   <label className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Tolerance<input type="number" step="any" value={tolerance} onChange={(e) => setTolerance(Number(e.target.value) || 1e-10)} className="mt-1 block w-28 rounded-lg border border-slate-300 bg-white px-2 py-2 text-sm dark:border-slate-700 dark:bg-slate-950" /></label>
+                  {operation === 'multiply' && <label className="text-[10px] font-bold uppercase tracking-wide text-slate-400">B columns<input type="number" min={1} max={50} value={bColumns} onChange={(e) => setBColumns(Math.max(1, Math.min(50, Number(e.target.value) || 1)))} className="mt-1 block w-24 rounded-lg border border-slate-300 bg-white px-2 py-2 text-sm dark:border-slate-700 dark:bg-slate-950" /></label>}
                   {operation === 'power' && <label className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Power n<input type="number" min={-100} max={100} value={power} onChange={(e) => setPower(Number(e.target.value))} className="mt-1 block w-24 rounded-lg border border-slate-300 bg-white px-2 py-2 text-sm dark:border-slate-700 dark:bg-slate-950" /></label>}
                 </div>
               )}
