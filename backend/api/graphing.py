@@ -1409,10 +1409,23 @@ def _trapezoid(values: np.ndarray, coords: np.ndarray, axis: int = -1):
 
 
 def _numeric_integral(values: np.ndarray, coords: np.ndarray) -> float:
-    finite = np.isfinite(values) & np.isfinite(coords)
-    if finite.sum() < 2:
+    values = np.asarray(values, dtype=float)
+    coords = np.asarray(coords, dtype=float)
+    if values.shape != coords.shape:
+        raise ValueError("Integration values and coordinates must have matching shapes.")
+    finite_indices = np.flatnonzero(np.isfinite(values) & np.isfinite(coords))
+    if finite_indices.size < 2:
         return 0.0
-    return float(_trapezoid(values[finite], coords[finite]))
+
+    # Do not bridge across NaN/Inf gaps (poles, domain breaks, etc.). Integrate
+    # each contiguous finite run independently, then combine the signed areas.
+    breaks = np.flatnonzero(np.diff(finite_indices) > 1) + 1
+    segments = np.split(finite_indices, breaks)
+    total = 0.0
+    for segment in segments:
+        if segment.size >= 2:
+            total += float(_trapezoid(values[segment], coords[segment]))
+    return total
 
 
 def _eval_explicit_function(fn_expr: sp.Expr, variable: sp.Symbol, lo: float, hi: float, count: int = 3000):
@@ -1512,7 +1525,7 @@ def _numeric_branch_area(branch_a, branch_b, lo, hi, count=3200):
     b = np.broadcast_to(_safe_array(fb(grid)), grid.shape)
     gap = np.abs(a-b)
     finite = np.isfinite(gap)
-    return _numeric_integral(gap[finite], grid[finite]), grid, a, b
+    return _numeric_integral(gap, grid), grid, a, b
 
 
 def _surface_function(meta, eq):
