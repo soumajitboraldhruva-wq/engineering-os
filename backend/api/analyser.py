@@ -132,7 +132,8 @@ class CoordinatesRequest(BaseModel):
 class FileAnalysisRequest(BaseModel):
     text: str = Field(min_length=1)
     mode: int = Field(ge=0, le=6)
-    variables: int = Field(default=3, ge=2, le=64)
+    # A 1D sequence legitimately contains a single selected variable.
+    variables: int = Field(default=3, ge=1, le=64)
     angle_unit: int = Field(default=0, ge=0, le=1)
     horizon: int = Field(default=4, ge=1, le=1000)
     tolerance: float | None = Field(default=None, ge=-1.0, le=100.0)
