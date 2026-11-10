@@ -9,6 +9,8 @@ from typing import Any
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
+from .data_import import inspect_bytes, inspect_text
+
 router = APIRouter()
 
 
@@ -421,3 +423,36 @@ async def puzzle_generic(req: PuzzleGenericRequest):
         ["--web-puzzle-generic", str(req.state_size), str(req.depth), str(req.node_limit)],
         "\n".join(lines),
     )
+
+
+# ---------------------------------------------------------------------------------------
+# Dataset inspection: parses CSV / TSV / TXT / Excel (or pasted text) into named columns,
+# detects headers, units, dates, multiple tables and column groups, so the UI can let the
+# user pick X / series columns. Pure parsing - all mathematics stays in the C++ engine.
+# ---------------------------------------------------------------------------------------
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+
+
+@router.post("/inspect-file")
+async def inspect_uploaded_file(file: UploadFile = File(...)):
+    filename = os.path.basename(file.filename or "upload.dat")
+    payload = await file.read()
+    if not payload:
+        raise HTTPException(status_code=422, detail="Uploaded file is empty.")
+    if len(payload) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Uploaded file exceeds the 50 MiB limit.")
+    result = await asyncio.to_thread(inspect_bytes, filename, payload)
+    if not result.get("ok"):
+        raise HTTPException(status_code=422, detail=result.get("error", "Could not read this file."))
+    return result
+
+
+@router.post("/inspect-text")
+async def inspect_pasted_text(req: dict[str, str]):
+    text = req.get("text", "")
+    if not text.strip():
+        raise HTTPException(status_code=422, detail="No data supplied.")
+    result = await asyncio.to_thread(inspect_text, text, req.get("filename") or "pasted data")
+    if not result.get("ok"):
+        raise HTTPException(status_code=422, detail=result.get("error", "No numeric data was found."))
+    return result

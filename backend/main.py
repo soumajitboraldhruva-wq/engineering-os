@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import os
 
-from api import calculator, matrices, ode, graphing, analyser, cube
+from api import calculator, matrices, ode, graphing, analyser
 
 app = FastAPI(title="Engineering OS API")
 
@@ -49,11 +49,16 @@ app.include_router(
     tags=["Sequence & Curve Analyser"],
 )
 
-app.include_router(
-    cube.router,
-    prefix="/api/cube",
-    tags=["Cube Solver"],
-)
+# The Cube Solver is switched off for now (hidden, not deleted). Set ENABLE_CUBE_SOLVER=1 to bring it back
+# (also set VITE_SHOW_CUBE_SOLVER=true for the frontend).
+if os.getenv("ENABLE_CUBE_SOLVER", "0").strip().lower() in ("1", "true", "yes", "on"):
+    from api import cube
+
+    app.include_router(
+        cube.router,
+        prefix="/api/cube",
+        tags=["Cube Solver"],
+    )
 
 
 @app.get("/")

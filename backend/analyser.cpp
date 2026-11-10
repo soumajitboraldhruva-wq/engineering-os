@@ -1223,7 +1223,7 @@ Model exactEventualCycle(const vector<ld>& x, const vector<ld>& y) {
     if (n < 9) return {};
     int bestMu = -1, bestLambda = -1;
     for (int lambda = 1; lambda <= n / 3 && bestLambda < 0; ++lambda) {
-        for (int mu = 0; mu + 3 * lambda <= n; ++mu) {
+        for (int mu = 0; n - mu >= max(8, 4 * lambda); ++mu) {
             bool ok = true;
             for (int i = mu; i + lambda < n && ok; ++i)
                 if (!approxEqual(y[i], y[i + lambda], 1e-10L, 1e-10L)) ok = false;
@@ -2242,6 +2242,8 @@ Model fitPiecewiseLinearModel(const vector<ld>&,const vector<ld>&);
 Model fitPiecewiseConstantModel(const vector<ld>&,const vector<ld>&);
 Model fitSegmentedLinearModel(const vector<ld>&,const vector<ld>&,int);
 Model fitChirpModel(const vector<ld>&,const vector<ld>&,ld,ld);
+Model fitMultiToneModel(const vector<ld>&,const vector<ld>&,int);
+Model fitShiftedExponentialLocal(const vector<ld>&,const vector<ld>&);
 Model fitDampedSinusoidModel(const vector<ld>&,const vector<ld>&,ld,ld);
 Model fitSeasonalTemplateModel(const vector<ld>&,const vector<ld>&,int,int=1);
 Model fitPeriodicDifferenceModel(const vector<ld>&,const vector<ld>&,int);
@@ -2251,13 +2253,34 @@ Model fitAdaptiveChirpEnvelopeModel(const vector<ld>&,const vector<ld>&);
 Model fitRobustStaircaseProgression(const vector<ld>&,const vector<ld>&);
 vector<int> detectChangePoints(const vector<ld>& y,int minSegment=5,ld threshold=3.0L);
 
+vector<int> dftDominantPeriods(const vector<ld>& y,int topK);
+ld refineSinusoidFrequency(const vector<ld>&x,const vector<ld>&y,ld w0);
+
 Model fitByFamily(const string& family,const vector<ld>& x,const vector<ld>& y,int degree=1,ld param=0,ld param2=0){
+    // param <= 0 means "estimate it": the manual-fit UI leaves frequency / width / penalty at 0 by default.
+    if(!(param>0)&&x.size()==y.size()&&x.size()>=8){
+        if(family=="sin"||family=="fourier"||family=="damped_sine"){
+            ld dxm=1;{vector<ld>dd;for(size_t i=1;i<x.size();++i)if(x[i]>x[i-1])dd.push_back(x[i]-x[i-1]);if(!dd.empty())dxm=quantile(dd,.5L);}
+            auto pers=dftDominantPeriods(y,1);
+            if(!pers.empty()){
+                ld w=refineSinusoidFrequency(x,y,2*PI/(pers[0]*dxm));
+                if(w>0)param=(family=="fourier")?2*PI/w:w;
+            }
+        }else if(family=="rbf"){
+            ld span=*max_element(x.begin(),x.end())-*min_element(x.begin(),x.end());
+            param=max<ld>(span/max<ld>(4.0L,(ld)x.size()/3.0L),1e-3L);
+        }else if(family=="ridge_basis"||family=="lasso_basis"||family=="elastic_basis"||family=="huber_basis"||family=="symbolic"){
+            param=1e-2L;
+        }
+    }
     if(family=="mean")return fitMeanModel(x,y);
     if(family=="linear")return fitLinearModel(x,y);
     if(family=="poly")return fitPolyModel(x,y,degree);
     if(family=="chebyshev")return fitChebyshevModel(x,y,degree);
     if(family=="taylor")return fitNewtonTaylorModel(x,y,degree);
     if(family=="exp")return fitExpModel(x,y);
+    if(family=="exp_offset")return fitShiftedExponentialLocal(x,y);
+    if(family=="multitone")return fitMultiToneModel(x,y,degree);
     if(family=="log")return fitLogModel(x,y);
     if(family=="power")return fitPowerModel(x,y);
     if(family=="rational")return fitRationalModel(x,y,degree);
@@ -2364,6 +2387,82 @@ vector<int> detectPeriodicCandidates(const vector<ld>& x,const vector<ld>& y){
     return out;
 }
 
+// A zero-order-hold / staircase model is only a sensible candidate when the data
+// really sits on plateaus: a large share of consecutive samples must be (nearly)
+// unchanged compared with the overall spread. Without this gate a trending noisy
+// series can be mislabelled as a "step signal".
+// Families whose coefficient count is controlled by a penalty (ridge/lasso/elastic net,
+// Huber, kernel ridge, symbolic search) may legitimately have many nominal terms.
+bool isRegularizedFamily(const string&f){
+    return f=="ridge_basis"||f=="lasso_basis"||f=="elastic_basis"||f=="huber_basis"||f=="symbolic"||f=="rbf"||f=="single_feature";
+}
+
+bool hasPlateauEvidence(const vector<ld>& y){
+    const int n=sizeToInt(y.size());
+    if(n<8)return false;
+    const ld scale=max<ld>(robustScale(y),1e-12L);
+    int flat=0;
+    for(int i=1;i<n;++i)if(fabsl(y[i]-y[i-1])<=0.04L*scale+1e-12L)++flat;
+    return (ld)flat/(ld)(n-1)>=0.35L;
+}
+
+// Minimises the squared error of "trend + sinusoid" over the angular frequency w
+// (coarse scan, then golden-section refinement) starting around w0.
+ld refineSinusoidFrequency(const vector<ld>&x,const vector<ld>&y,ld w0){
+    auto sse=[&](ld w){
+        Model m=fitSinusoidModel(x,y,w);
+        if(!m.valid||m.fitted.size()!=y.size())return numeric_limits<ld>::infinity();
+        ld t=0;for(size_t i=0;i<y.size();++i){ld e=y[i]-m.fitted[i];t+=e*e;}return t;
+    };
+    if(!(w0>0))return numeric_limits<ld>::quiet_NaN();
+    const ld lo=w0*0.5L,hi=w0*1.6L;const int G=80;
+    ld bestW=w0,best=sse(w0);
+    for(int i=0;i<=G;++i){ld w=lo+(hi-lo)*(ld)i/G;ld v=sse(w);if(v<best){best=v;bestW=w;}}
+    ld a=max(lo,bestW-(hi-lo)/G),b=min(hi,bestW+(hi-lo)/G);
+    const ld gr=0.6180339887498949L;
+    ld c=b-gr*(b-a),d=a+gr*(b-a),fc=sse(c),fd=sse(d);
+    for(int it=0;it<40;++it){
+        if(fc<fd){b=d;d=c;fd=fc;c=b-gr*(b-a);fc=sse(c);}
+        else{a=c;c=d;fc=fd;d=a+gr*(b-a);fd=sse(d);}
+    }
+    ld w=(a+b)/2;
+    return sse(w)<best?w:bestW;
+}
+
+// Jointly refines the ringing frequency w and decay rate alpha of
+// "offset + exp(-alpha t)(A sin wt + B cos wt)": coarse (w,alpha) scan followed by
+// alternating golden-section passes. Returns {w,alpha}; w<=0 when nothing usable.
+pair<ld,ld> refineDampedSinusoid(const vector<ld>&x,const vector<ld>&y,ld w0){
+    const ld inf=numeric_limits<ld>::infinity();
+    if(x.size()<10||!(w0>0))return {0,0};
+    const ld span=max<ld>(x.back()-x.front(),1e-9L);
+    auto sse=[&](ld w,ld al){
+        Model m=fitDampedSinusoidModel(x,y,w,al);
+        if(!m.valid||m.fitted.size()!=y.size())return inf;
+        ld t=0;for(size_t i=0;i<y.size();++i){ld e=y[i]-m.fitted[i];t+=e*e;}return t;
+    };
+    ld bw=w0,ba=0,best=sse(w0,0);
+    const ld aLo=-1.5L/span,aHi=10.0L/span;
+    for(int iw=0;iw<=8;++iw){
+        ld w=w0*(0.75L+0.5L*(ld)iw/8.0L);
+        for(int ia=0;ia<=24;++ia){
+            ld al=aLo+(aHi-aLo)*(ld)ia/24.0L;
+            ld v=sse(w,al);if(v<best){best=v;bw=w;ba=al;}
+        }
+    }
+    auto golden=[&](const function<ld(ld)>&f,ld a,ld b){
+        const ld gr=0.6180339887498949L;ld c=b-gr*(b-a),d=a+gr*(b-a),fc=f(c),fd=f(d);
+        for(int it=0;it<36;++it){if(fc<fd){b=d;d=c;fd=fc;c=b-gr*(b-a);fc=f(c);}else{a=c;c=d;fc=fd;d=a+gr*(b-a);fd=f(d);}}
+        return (a+b)/2;
+    };
+    for(int round=0;round<4;++round){
+        const ld dw=bw*0.06L/(round+1),da=(aHi-aLo)/24.0L/(round+1);
+        ld a2=golden([&](ld al){return sse(bw,al);},ba-da,ba+da);if(sse(bw,a2)<best){best=sse(bw,a2);ba=a2;}
+        ld w2=golden([&](ld w){return sse(w,ba);},bw-dw,bw+dw);if(w2>0&&sse(w2,ba)<best){best=sse(w2,ba);bw=w2;}
+    }
+    return {bw,ba};
+}
+
 vector<FamilySpec> makeSpecs(const vector<ld>& x,const vector<ld>& y){
     vector<FamilySpec>s;
     int n=sizeToInt(y.size());
@@ -2372,11 +2471,11 @@ vector<FamilySpec> makeSpecs(const vector<ld>& x,const vector<ld>& y){
     for(int d:candidateDegrees(n))s.push_back({"poly",d,0});
     for(int d:{6,8,10,12,15,18}) if(d+1<=n) s.push_back({"chebyshev",d,0});
     for(int ord:{2,3,4,5,6}) if(n>=ord+2) s.push_back({"taylor",ord,0});
-    s.push_back({"exp",1,0});s.push_back({"log",1,0});s.push_back({"power",1,0});
+    s.push_back({"exp",1,0});s.push_back({"exp_offset",1,0});s.push_back({"log",1,0});s.push_back({"power",1,0});
     s.push_back({"rational",1,0});s.push_back({"rational",2,0});
     s.push_back({"holt",1,0});s.push_back({"damped_holt",1,0});
     s.push_back({"piecewise",1,0});
-    s.push_back({"piecewise_const",1,0});
+    if(hasPlateauEvidence(y)) s.push_back({"piecewise_const",1,0});
     for(int k=1;k<=3;++k) s.push_back({"segmented",k,0});
     for(int d=1;d<=4;++d){
         s.push_back({"root_poly",d,1.0L});
@@ -2403,13 +2502,36 @@ vector<FamilySpec> makeSpecs(const vector<ld>& x,const vector<ld>& y){
         const vector<ld> w2={0.0L,0.25L,0.5L,1.0L,2.0L};
         for(ld a:w1) for(ld b:w2) if(fabsl(a)+fabsl(b)>0) s.push_back({"chirp",1,a,b});
     }
+    // Candidate periods are counted in SAMPLES. Sinusoid frequencies act on x, so the
+    // period is converted to x-units with the median grid spacing (identity for x=1,2,3,...).
+    ld dxm=1;{vector<ld>dd;for(size_t i=1;i<x.size();++i)if(x[i]>x[i-1])dd.push_back(x[i]-x[i-1]);if(!dd.empty())dxm=quantile(dd,.5L);}
+    auto xperiod=[dxm](int p){return (ld)p*dxm;};
     set<int>periods={2,3,4,5,6,8,10,12,15,18,20,24,30,36,48};
     ld extremaPeriod=estimateExtremaPeriod(x,y);
-    if(isfinite(extremaPeriod)){int ep=max(3,(int)llround(extremaPeriod));if(ep>=3&&ep<=n/2)periods.insert(ep);}
+    if(isfinite(extremaPeriod)){int ep=max(3,(int)llround(extremaPeriod/dxm));if(ep>=3&&ep<=n/2)periods.insert(ep);}
     for(int p:dftDominantPeriods(y)) periods.insert(p);
     for(int p:detectPeriodicCandidates(x,y)) periods.insert(p);
-    for(int p:periods)if(p>=2&&p<=max(2,n))s.push_back({"sin",1,2*PI/p});
-    for(int p:periods)if(p>=3&&p<=max(3,n))for(int k: {1,2,3,4})s.push_back({"fourier",k,(ld)p});
+    for(int p:periods)if(p>=2&&p<=max(2,n))s.push_back({"sin",1,2*PI/xperiod(p)});
+    for(int p:periods)if(p>=3&&p<=max(3,n))for(int k: {1,2,3,4})s.push_back({"fourier",k,xperiod(p)});
+    // Fine-tuned (non-integer) frequencies for the strongest spectral candidates: a pure
+    // tone whose period is not a whole number of samples is otherwise only approximated.
+    vector<ld> refinedW;
+    if(n>=12){
+        vector<int> cand=dftDominantPeriods(y,3);
+        for(int p:detectPeriodicCandidates(x,y))cand.push_back(p);
+        if(isfinite(extremaPeriod))cand.push_back((int)llround(extremaPeriod/dxm));
+        {vector<int>ded;for(int pp:cand)if(find(ded.begin(),ded.end(),pp)==ded.end())ded.push_back(pp);cand.swap(ded);} // strongest-first
+        int used=0;
+        for(int p:cand){
+            if(p<2||used>=4)continue;++used;
+            ld w=refineSinusoidFrequency(x,y,2*PI/xperiod(p));
+            if(isfinite(w)&&w>0)refinedW.push_back(w);
+        }
+        for(ld w:refinedW){
+            s.push_back({"sin",1,w});
+            for(int k:{1,2,3})s.push_back({"fourier",k,2*PI/w});
+        }
+    }
     // Seasonal-template and repeating-increment models target cases such as
     // 10,20,11,21,12,22,... where plain trend fitting looks deceptively linear.
     for(int p:detectPeriodicCandidates(x,y)) if(p>=2 && p<=n/2){
@@ -2423,6 +2545,7 @@ vector<FamilySpec> makeSpecs(const vector<ld>& x,const vector<ld>& y){
     if(n>=20){
         s.push_back({"adaptive_chirp_envelope",1,0});
     }
+    if(n>=24){s.push_back({"multitone",2,0});s.push_back({"multitone",3,0});}
     if(n>=14){
         s.push_back({"piecewise_adaptive",1,0});
         s.push_back({"piecewise_adaptive",2,0});
@@ -2434,7 +2557,9 @@ vector<FamilySpec> makeSpecs(const vector<ld>& x,const vector<ld>& y){
     if(n>=14){
         ld span=x.empty()?1:(*max_element(x.begin(),x.end())-*min_element(x.begin(),x.end()));
         vector<ld> alphas={0.0L,0.5L/max<ld>(span,1e-6L),1.0L/max<ld>(span,1e-6L),2.0L/max<ld>(span,1e-6L),4.0L/max<ld>(span,1e-6L)};
-        for(int p:periods) if(p>=2&&p<=max(2,n)) for(ld a:alphas) s.push_back({"damped_sine",1,2*PI/p,a});
+        for(int p:periods) if(p>=2&&p<=max(2,n)) for(ld a:alphas) s.push_back({"damped_sine",1,2*PI/xperiod(p),a});
+        for(ld w:refinedW) for(ld a:alphas) s.push_back({"damped_sine",1,w,a});
+        for(ld w:refinedW){auto wa=refineDampedSinusoid(x,y,w);if(wa.first>0)s.push_back({"damped_sine",1,wa.first,wa.second});}
     }
     // RBF is most useful for moderately large windows.
     for(ld sigmaMult:{0.5L,1.5L}) {
@@ -2561,7 +2686,7 @@ ChunkValidation validatePiecewiseConstantRolling(const vector<ld>&x,const vector
     if(blocks.size()<3||allActual.empty()){out.reason="insufficient within-plateau validation blocks";return out;}
     int total=0,passed=0;ld wr=0,wm=0,wr2=0,wh=0,wsm=0,wda=0,wcor=0;int daN=0,corN=0;
     for(const auto&b:blocks){int w=max(1,b.nValid);total+=w;wr+=b.rmse*w;wm+=b.mae*w;wr2+=b.r2*w;wh+=b.hitRate*w;wsm+=b.smapePct*w;if(b.blockPassRate>0.5L)++passed;if(isfinite(b.directionalAccuracy)){wda+=b.directionalAccuracy*w;daN+=w;}if(isfinite(b.correlation)){wcor+=b.correlation*w;corN+=w;}}
-    Metrics m;m.nTrain=blocks.front().nTrain;m.nValid=total;m.validationBlocks=sizeToInt(blocks.size());m.rmse=wr/total;m.mae=wm/total;m.r2=wr2/total;m.hitRate=wh/total;m.smapePct=wsm/total;
+    Metrics m;m.nTrain=blocks.front().nTrain;m.nValid=total;m.validationBlocks=sizeToInt(blocks.size());m.rmse=wr/total;m.mae=wm/total;m.r2=r2Score(allActual,allPred);m.hitRate=wh/total;m.smapePct=wsm/total;
     m.meanDeviationPct=meanOf(allDev);m.medianDeviationPct=quantile(allDev,.5L);m.p90DeviationPct=quantile(allDev,.9L);m.maxDeviationPct=*max_element(allDev.begin(),allDev.end());
     m.directionalAccuracy=daN?wda/daN:numeric_limits<ld>::quiet_NaN();m.correlation=corN?wcor/corN:numeric_limits<ld>::quiet_NaN();
     m.normalizedRMSE=m.rmse/max(robustScale(y),1e-12L);
@@ -2575,7 +2700,7 @@ ChunkValidation validatePiecewiseConstantRolling(const vector<ld>&x,const vector
     m.scoreP90=expl(-m.p90DeviationPct/tol);
     m.scoreR2=(isfinite(m.r2)&&m.r2>=0)?clamp01(m.r2):1.0L/(1.0L+max<ld>(0,m.mase));
     // Direction and correlation are not applicable to a persistent plateau.
-    m.scoreDirection=1.0L;m.scoreCorrelation=1.0L;
+    m.scoreDirection=0.5L;m.scoreCorrelation=0.5L;
     m.scoreStability=m.blockPassRate;m.scoreComplexity=.92L;
     // Use only diagnostics that are meaningful for this specialized model.
     ld product=max<ld>(1e-18L,m.scoreRMSE*m.scoreMAE*m.scoreP90*max<ld>(1e-6L,m.scoreR2)*max<ld>(1e-6L,m.scoreStability)*m.scoreComplexity);
@@ -2585,18 +2710,29 @@ ChunkValidation validatePiecewiseConstantRolling(const vector<ld>&x,const vector
 }
 
 ChunkValidation validateRolling(const vector<ld>&x,const vector<ld>&y,const FamilySpec&spec,int window,
-                                ld tolerancePct,bool strictTolerance){
+                                ld tolerancePct,bool strictTolerance,int forecastHorizon=0)
+{
     ChunkValidation out; int n=sizeToInt(y.size());
     if(n<10||window<8||window>n-2)return out;
     if(spec.family=="piecewise_const") return validatePiecewiseConstantRolling(x,y,window,tolerancePct,strictTolerance);
-    const vector<ld> horizons = [&](){vector<ld>h;for(int q:candidateHorizons(n))h.push_back(q);return h;}();
+    // Validate at the horizons the user will actually use, not only at 1-2 steps ahead;
+    // otherwise a model that is good one step out but useless at the requested horizon
+    // (e.g. a local polynomial extrapolation) can win.
+    const vector<ld> horizons = [&](){
+        vector<int>hs=candidateHorizons(n);
+        const int cap=max(2,n/3);
+        if(forecastHorizon>1)hs.push_back(min(forecastHorizon,cap));
+        sort(hs.begin(),hs.end());hs.erase(unique(hs.begin(),hs.end()),hs.end());
+        vector<ld>h;for(int q:hs)h.push_back(q);return h;
+    }();
     vector<Metrics> blocks; vector<ld> allActual,allPred,allDev;
     const ld scale=max({robustScale(y),medianAbs(y)*0.25L,1e-12L});
     const int minTrain=max(8,spec.degree+3);
     for(ld hh:horizons){
         int h=(int)hh, firstOrigin=window,lastOrigin=n-h;
         if(lastOrigin<firstOrigin)continue;
-        auto origins=selectValidationOrigins(firstOrigin,lastOrigin,n<=160?24:48);
+        const bool heavyFamily=(spec.family=="multitone"||spec.family=="damped_sine"||spec.family=="chirp"||spec.family=="rbf"||spec.family=="symbolic"||spec.family=="root_poly"||spec.family=="segmented"||spec.family=="piecewise_adaptive"||spec.family=="osc_envelope"||spec.family=="adaptive_chirp_envelope"||spec.family=="exp_offset"||spec.family=="single_feature");
+        auto origins=selectValidationOrigins(firstOrigin,lastOrigin,heavyFamily?(n>=80?5:8):(n<=100?24:(n<=160?14:10)));
         for(ld oo:origins){
             int origin=(int)oo,start=max(0,origin-window);
             if(origin-start<minTrain)continue;
@@ -2630,7 +2766,7 @@ ChunkValidation validateRolling(const vector<ld>&x,const vector<ld>&y,const Fami
     ld wr=0,wm=0,wr2=0,wh=0,wsm=0,wda=0,wcor=0;int total=0,daN=0,corN=0,passed=0;
     for(const auto&b:blocks){int w=max(1,b.nValid);total+=w;wr+=b.rmse*w;wm+=b.mae*w;wr2+=b.r2*w;wh+=b.hitRate*w;wsm+=b.smapePct*w;if(b.blockPassRate>0.5L)++passed;if(isfinite(b.directionalAccuracy)){wda+=b.directionalAccuracy*w;daN+=w;}if(isfinite(b.correlation)){wcor+=b.correlation*w;corN+=w;}}
     Metrics agg;agg.nTrain=blocks.front().nTrain;agg.nValid=total;agg.validationBlocks=sizeToInt(blocks.size());
-    agg.rmse=wr/total;agg.mae=wm/total;agg.r2=wr2/total;agg.hitRate=wh/total;agg.smapePct=wsm/total;
+    agg.rmse=wr/total;agg.mae=wm/total;agg.r2=r2Score(allActual,allPred);agg.hitRate=wh/total;agg.smapePct=wsm/total;
     agg.meanDeviationPct=meanOf(allDev);agg.medianDeviationPct=quantile(allDev,.5L);agg.p90DeviationPct=quantile(allDev,.9L);agg.maxDeviationPct=*max_element(allDev.begin(),allDev.end());
     agg.directionalAccuracy=daN?wda/daN:numeric_limits<ld>::quiet_NaN();agg.correlation=corN?wcor/corN:numeric_limits<ld>::quiet_NaN();
     agg.normalizedRMSE=agg.rmse/scale;
@@ -2760,20 +2896,71 @@ Model fitChirpModel(const vector<ld>& x,const vector<ld>& y,ld w1,ld w2){
 Model fitDampedSinusoidModel(const vector<ld>& x,const vector<ld>& y,ld w,ld alpha){
     if(x.size()<10||x.size()!=y.size()||w<=0)return{};
     vector<vector<ld>>A(x.size(),vector<ld>(3));
+    const ld x0=x.front();
     for(size_t i=0;i<x.size();++i){
-        ld env=expl(clamp(-alpha*x[i],-40.0L,40.0L));
-        A[i]={1,env*sinl(w*x[i]),env*cosl(w*x[i])};
+        ld env=expl(clamp(-alpha*(x[i]-x0),-40.0L,40.0L));
+        A[i]={1,env*sinl(w*(x[i]-x0)),env*cosl(w*(x[i]-x0))};
     }
     vector<ld>c;if(!leastSquaresQR(A,y,c))return{};
     Model m;m.valid=true;m.name="Damped sinusoid / transient response";
     m.category="Signal processing / electrical transient (RLC-style ring-down)";m.complexity=4;
-    m.predict=[c,w,alpha](ld z){ld env=expl(clamp(-alpha*z,-40.0L,40.0L));return c[0]+env*(c[1]*sinl(w*z)+c[2]*cosl(w*z));};
+    m.predict=[c,w,alpha,x0](ld z){ld t=z-x0;ld env=expl(clamp(-alpha*t,-40.0L,40.0L));return c[0]+env*(c[1]*sinl(w*t)+c[2]*cosl(w*t));};
     m.nextValue=m.predict(x.back()+1);m.fitted.reserve(x.size());for(ld xx:x)m.fitted.push_back(m.predict(xx));
     m.formula="y = "+fmt(c[0])+" + exp(-"+fmt(alpha,6)+"x)*("+fmt(c[1])+" sin("+fmt(w,6)+"x) + "+fmt(c[2])+" cos("+fmt(w,6)+"x))";
     m.note="Second-order underdamped transient-response shape (RLC ring-down / damped oscillator); alpha is the decay rate, w the ringing frequency.";
     return m;
 }
 
+
+// Trend + sum of K sinusoids with unrelated frequencies (matching pursuit on the residual,
+// each frequency refined, then all amplitudes re-solved jointly and the frequencies polished
+// once). This is the standard "sum of tones" description of harmonic / multi-frequency signals
+// that a single sinusoid or a harmonic series of one fundamental cannot capture.
+Model fitMultiToneModel(const vector<ld>&x,const vector<ld>&y,int tones){
+    const int n=sizeToInt(y.size());
+    if(tones<2||tones>4||n<12+4*tones||x.size()!=y.size())return{};
+    ld dxm=1;{vector<ld>dd;for(size_t i=1;i<x.size();++i)if(x[i]>x[i-1])dd.push_back(x[i]-x[i-1]);if(!dd.empty())dxm=quantile(dd,.5L);}
+    auto solve=[&](const vector<ld>&ws,vector<ld>&coef,ld&sse)->bool{
+        const int cols=2+2*sizeToInt(ws.size());
+        vector<vector<ld>>A(n,vector<ld>(cols));
+        for(int i=0;i<n;++i){A[i][0]=1;A[i][1]=x[i];for(size_t j=0;j<ws.size();++j){A[i][2+2*j]=sinl(ws[j]*x[i]);A[i][3+2*j]=cosl(ws[j]*x[i]);}}
+        if(!leastSquaresQR(A,y,coef))return false;
+        sse=0;for(int i=0;i<n;++i){ld p=0;for(int k=0;k<cols;++k)p+=A[i][k]*coef[k];ld e=y[i]-p;sse+=e*e;}
+        return isfinite(sse);
+    };
+    vector<ld>ws,coef;ld sse=0;
+    vector<ld>resid=y;
+    {auto c=linearFit(x,y);if(c.size()==2)for(int i=0;i<n;++i)resid[i]-=c[0]+c[1]*x[i];}
+    for(int t=0;t<tones;++t){
+        auto per=dftDominantPeriods(resid,1);if(per.empty())break;
+        ld w=refineSinusoidFrequency(x,resid,2*PI/(per[0]*dxm));
+        if(!(w>0))break;
+        bool dup=false;for(ld q:ws)if(fabsl(q-w)<0.12L*w)dup=true;
+        if(dup)break;
+        vector<ld>trial=ws;trial.push_back(w);
+        if(!solve(trial,coef,sse))break;
+        ws=trial;
+        for(int i=0;i<n;++i){ld p=coef[0]+coef[1]*x[i];for(size_t j=0;j<ws.size();++j)p+=coef[2+2*j]*sinl(ws[j]*x[i])+coef[3+2*j]*cosl(ws[j]*x[i]);resid[i]=y[i]-p;}
+    }
+    if(ws.size()<2)return{};
+    // joint polish of every frequency (golden section, others held fixed)
+    const ld gr=0.6180339887498949L;
+    for(size_t j=0;j<ws.size();++j){
+        auto f=[&](ld w){vector<ld>t=ws;t[j]=w;vector<ld>cf;ld e=0;return solve(t,cf,e)?e:numeric_limits<ld>::infinity();};
+        ld a=ws[j]*0.94L,b=ws[j]*1.06L,c=b-gr*(b-a),d=a+gr*(b-a),fc=f(c),fd=f(d);
+        for(int it=0;it<30;++it){if(fc<fd){b=d;d=c;fd=fc;c=b-gr*(b-a);fc=f(c);}else{a=c;c=d;fc=fd;d=a+gr*(b-a);fd=f(d);}}
+        ld w=(a+b)/2;if(f(w)<f(ws[j]))ws[j]=w;
+    }
+    if(!solve(ws,coef,sse))return{};
+    Model m;m.valid=true;m.name="Multi-tone sinusoidal regression ("+to_string(ws.size())+" tones)";
+    m.category="Spectral / sum-of-sinusoids signal model";m.complexity=2+2*sizeToInt(ws.size());
+    m.predict=[coef,ws](ld z){ld p=coef[0]+coef[1]*z;for(size_t j=0;j<ws.size();++j)p+=coef[2+2*j]*sinl(ws[j]*z)+coef[3+2*j]*cosl(ws[j]*z);return p;};
+    m.fitted.reserve(n);for(ld z:x)m.fitted.push_back(m.predict(z));
+    m.nextValue=m.predict(x.back()+1);
+    ostringstream os;os<<"trend + "<<ws.size()<<" sinusoids, periods =";for(size_t j=0;j<ws.size();++j)os<<(j?", ":" ")<<fmt(2*PI/ws[j],6);
+    m.formula=os.str();
+    return m;
+}
 
 Model fitAdaptiveChirpEnvelopeModel(const vector<ld>&x,const vector<ld>&y){
     if(x.size()!=y.size()||x.size()<20)return{};
@@ -3167,35 +3354,47 @@ ld evalPieceSegment(const PieceSegment&s,ld z){ld t=(z-s.mid)/s.half,q=1,v=0;for
 // the remaining log-linear problem exactly.  It is deliberately local: a
 // complicated global signal can therefore contain an exponential tail without
 // forcing the whole dataset into an exponential family.
+// y = C + A*exp(b*(x-x0)). The asymptote C may lie below the data (decay/growth towards a
+// floor) or above it (charging curves such as 5*(1-exp(-0.5x))); both are handled by fitting
+// z=y and z=-y. C is found by a log-spaced scan followed by golden-section refinement, and
+// (A,b) follow from a log-linear least-squares fit at each C.
 Model fitShiftedExponentialLocal(const vector<ld>& x,const vector<ld>& y){
     if(x.size()<7||x.size()!=y.size())return{};
-    ld minY=*min_element(y.begin(),y.end()),maxY=*max_element(y.begin(),y.end());
-    ld span=max<ld>(maxY-minY,robustScale(y));
-    if(span<1e-12L)return{};
-    vector<ld> offsets;
-    // Fine enough to resolve an unknown vertical asymptote while staying cheap
-    // because this search is performed only inside already-detected local pieces.
-    for(int k=0;k<=160;++k) offsets.push_back(minY-2.0L*span*(ld)k/160.0L);
-    offsets.push_back(minY-3.0L*span);
-    ld best=numeric_limits<ld>::infinity(),bestC=0,bestA=0,bestB=0;
+    const ld inf=numeric_limits<ld>::infinity();
     const ld x0=x.front();
-    for(ld c:offsets){
-        vector<ld>ly(y.size());bool ok=true;
-        for(size_t i=0;i<y.size();++i){ld q=y[i]-c;if(!(q>0)&&isfinite(q)){ok=false;break;}ly[i]=logl(max<ld>(q,1e-300L));}
-        if(!ok)continue;
-        vector<ld>u(x.size());for(size_t i=0;i<x.size();++i)u[i]=x[i]-x0;
-        auto coef=linearFit(u,ly);if(coef.size()!=2)continue;
-        ld a=expl(coef[0]),b=coef[1];if(!isfinite(a)||!isfinite(b))continue;
-        ld sse=0;bool finite=true;
-        for(size_t i=0;i<x.size();++i){ld e=b*u[i];ld p;if(e>10000)p=numeric_limits<ld>::infinity();else p=c+a*expl(e);if(!isfinite(p)){finite=false;break;}ld r=y[i]-p;sse+=r*r;}
-        if(finite&&sse<best){best=sse;bestC=c;bestA=a;bestB=b;}
+    ld bestSSE=inf,bestC=0,bestA=0,bestB=0;
+    for(int sgn:{1,-1}){
+        vector<ld>z(y.size());for(size_t i=0;i<y.size();++i)z[i]=sgn*y[i];
+        ld minZ=*min_element(z.begin(),z.end()),maxZ=*max_element(z.begin(),z.end());
+        ld span=max<ld>(maxZ-minZ,robustScale(z));
+        if(span<1e-12L)continue;
+        auto evalC=[&](ld c,ld&A,ld&B)->ld{
+            vector<ld>lz(z.size()),u(z.size());
+            for(size_t i=0;i<z.size();++i){ld q=z[i]-c;if(!(q>0))return inf;lz[i]=logl(q);u[i]=x[i]-x0;}
+            auto co=linearFit(u,lz);if(co.size()!=2)return inf;
+            A=expl(co[0]);B=co[1];if(!isfinite(A)||!isfinite(B))return inf;
+            ld sse=0;
+            for(size_t i=0;i<z.size();++i){ld e=B*u[i];if(e>700)return inf;ld r=z[i]-(c+A*expl(e));sse+=r*r;}
+            return isfinite(sse)?sse:inf;
+        };
+        ld bt=-6,bv=inf;
+        for(int k=0;k<=66;++k){ld t=-6.0L+0.1L*k;ld A,B;ld v=evalC(minZ-span*powl(10.0L,t),A,B);if(v<bv){bv=v;bt=t;}}
+        if(!isfinite(bv))continue;
+        ld lo=bt-0.12L,hi=bt+0.12L;const ld gr=0.6180339887498949L;
+        auto f=[&](ld t){ld A,B;return evalC(minZ-span*powl(10.0L,t),A,B);};
+        ld c1=hi-gr*(hi-lo),d1=lo+gr*(hi-lo),f1=f(c1),f2=f(d1);
+        for(int it=0;it<50;++it){if(f1<f2){hi=d1;d1=c1;f2=f1;c1=hi-gr*(hi-lo);f1=f(c1);}else{lo=c1;c1=d1;f1=f2;d1=lo+gr*(hi-lo);f2=f(d1);}}
+        ld tb=(lo+hi)/2;ld A,B;ld v=evalC(minZ-span*powl(10.0L,tb),A,B);
+        ld cb=minZ-span*powl(10.0L,tb);
+        if(!(v<bv)){tb=bt;cb=minZ-span*powl(10.0L,bt);v=evalC(cb,A,B);}
+        if(isfinite(v)&&v<bestSSE){bestSSE=v;bestC=sgn*cb;bestA=sgn*A;bestB=B;}
     }
-    if(!isfinite(best))return{};
-    Model m;m.valid=true;m.name="Shifted exponential (local piece)";m.category="Piecewise nonlinear regression";m.complexity=3;
-    m.predict=[bestC,bestA,bestB,x0](ld z){ld e=bestB*(z-x0);if(e>10000)return numeric_limits<ld>::infinity();return bestC+bestA*expl(e);};
+    if(!isfinite(bestSSE))return{};
+    Model m;m.valid=true;m.name="Shifted exponential (offset + a*exp(b*x))";m.category="Nonlinear transformed regression";m.complexity=3;
+    m.predict=[bestC,bestA,bestB,x0](ld z){ld e=bestB*(z-x0);if(e>700)return numeric_limits<ld>::infinity();return bestC+bestA*expl(e);};
     m.fitted.reserve(x.size());for(ld z:x)m.fitted.push_back(m.predict(z));
     m.nextValue=m.predict(x.back()+1);
-    m.formula="y = c + a exp(b(x-x0)), local c="+fmt(bestC)+", a="+fmt(bestA)+", b="+fmt(bestB)+", x0="+fmt(x0);
+    m.formula="y = "+fmt(bestC)+" + ("+fmt(bestA)+")*exp(("+fmt(bestB)+")*(x-"+fmt(x0)+"))";
     return m;
 }
 
@@ -3356,6 +3555,11 @@ vector<int> strongShapeBreakCandidates(const vector<ld>&x,const vector<ld>&y){
         vector<ld>neigh;for(int j=max(0,i-3);j<=i-1;++j)neigh.push_back(fabsl(y[j+1]-y[j]));for(int j=i+1;j<=min((int)y.size()-2,i+3);++j)neigh.push_back(fabsl(y[j+1]-y[j]));
         ld neighborMedian=neigh.empty()?globalNoise:quantile(neigh,.5L);
         bool isolatedJump=jump>max<ld>(6.0L*max<ld>(neighborMedian,1e-9L),4.0L*max<ld>(globalNoise,1e-9L));
+        if(isolatedJump){
+            // A jump that returns to the old level is an outlier/spike, not a change of regime.
+            vector<ld>before(y.begin()+max(0,i-3),y.begin()+i),after(y.begin()+i,y.begin()+min((int)y.size(),i+3));
+            if(!before.empty()&&!after.empty()&&fabsl(quantile(after,.5L)-quantile(before,.5L))<0.5L*jump)isolatedJump=false;
+        }
         bool derivativeBreak=slopeJump>max<ld>(3.0L*localScale,0.20L*max({fabsl(left),fabsl(right),1.0L}));
         if(isolatedJump||derivativeBreak){
             ld jumpStrength=isolatedJump?(jump/max<ld>(neighborMedian,1e-9L)+10.0L):0.0L;
@@ -3392,7 +3596,279 @@ Model fitPiecewiseForcedCuts(const vector<ld>&x,const vector<ld>&y,const vector<
 }
 
 
-Analysis analyzeSequenceCore(const vector<ld>&x,const vector<ld>&y,int horizon,ld requestedTolerancePct=-1.0L){
+// ======================= Deterministic-but-erratic sequence detectors =======================
+// Collatz trajectories, logistic/quadratic maps, Recaman, Hofstadter, Golomb and many
+// OEIS-style arithmetic functions look random to any smooth regression, yet each is
+// produced by a short exact rule. These detectors recognise the rule from the data and,
+// once recognised, forecast by running the rule itself (never by curve fitting).
+
+// Decimal resolution of the data: 0 = all integers, 10^-k when every value is a multiple
+// of 10^-k (k<=9), -1 = unquantised. Used to tell genuine rule residuals from print rounding.
+ld dataQuantum(const vector<ld>&y){
+    bool allInt=true;for(ld v:y)if(!isInteger(v)){allInt=false;break;}
+    if(allInt)return 0;
+    for(int k=1;k<=9;++k){
+        const ld q=powl(10.0L,-(ld)k);bool ok=true;
+        for(ld v:y){ld r=v/q;if(fabsl(r-roundl(r))>1e-6L){ok=false;break;}}
+        if(ok)return q;
+    }
+    return -1;
+}
+
+ld ruleResidualTolerance(const vector<ld>&y){
+    ld q=dataQuantum(y),sc=1;for(ld v:y)sc=max(sc,fabsl(v));
+    if(q==0)return 1e-9L*sc;
+    if(q>0)return 8.0L*q;
+    return 1e-7L*sc;
+}
+
+// y(n+1) = c0 + c1 y(n) + c2 y(n)^2 (+ c3 y(n)^3): first-order iterated map. Covers the
+// logistic map, quadratic maps and affine recurrences. Chaotic maps amplify rounding error,
+// so the model is flagged and only the first steps of a forecast are trustworthy.
+Model exactIteratedMap(const vector<ld>&x,const vector<ld>&y){
+    const int n=sizeToInt(y.size());
+    if(n<9)return{};
+    ld mn=*min_element(y.begin(),y.end()),mx=*max_element(y.begin(),y.end());
+    if(mx-mn<1e-12L)return{};
+    const ld tol=ruleResidualTolerance(y);
+    for(int d=1;d<=3;++d){
+        if(n-1<2*(d+1)+3)break;
+        vector<vector<ld>>A;vector<ld>b;
+        for(int i=0;i+1<n;++i){vector<ld>row(d+1);ld p=1;for(int j=0;j<=d;++j){row[j]=p;p*=y[i];}A.push_back(row);b.push_back(y[i+1]);}
+        vector<ld>c;if(!leastSquaresQR(A,b,c))continue;
+        ld worst=0;
+        for(int i=0;i+1<n;++i){ld p=0,q=1;for(int j=0;j<=d;++j){p+=c[j]*q;q*=y[i];}worst=max(worst,fabsl(p-y[i+1]));}
+        if(worst>tol)continue;
+        if(d>=2&&fabsl(c[d])<1e-6L)continue;
+        Model m;m.valid=m.exact=true;m.complexity=d+1;
+        m.name=(d==1?"First-order affine map":d==2?"Quadratic iterated map (logistic-type)":"Cubic iterated map");
+        m.category="Exact deterministic recurrence (iterated map)";
+        ostringstream os;os<<"y(n+1) = ";for(int j=0;j<=d;++j){if(j)os<<" + ";os<<fmt(c[j],8);if(j==1)os<<"*y(n)";else if(j>=2)os<<"*y(n)^"<<j;}
+        m.formula=os.str();
+        const ld lastX=x.empty()?(ld)n:x.back();const ld lastY=y.back();
+        m.predict=[c,d,lastX,lastY](ld z){
+            long long steps=llroundl(z-lastX);if(steps<=0)return numeric_limits<ld>::quiet_NaN();
+            ld cur=lastY;
+            for(long long s=0;s<steps;++s){ld p=0,q=1;for(int j=0;j<=d;++j){p+=c[j]*q;q*=cur;}cur=p;if(!isfinite(cur)||fabsl(cur)>1e150L)return numeric_limits<ld>::quiet_NaN();}
+            return cur;
+        };
+        m.fitted=y;m.nextValue=m.predict(lastX+1);
+        m.note="Every observation obeys one first-order rule y(n+1)=f(y(n)). If the map is chaotic (for example the logistic map with r near 3.9) rounding in the data grows roughly exponentially, so only the first few forecast steps are numerically trustworthy.";
+        return m;
+    }
+    return{};
+}
+
+// Piecewise-affine map selected by y mod m (Collatz 3n+1 is the m=2 case).
+Model exactModularAffineMap(const vector<ld>&x,const vector<ld>&y){
+    const int n=sizeToInt(y.size());
+    if(n<12)return{};
+    vector<long long>v(n);
+    for(int i=0;i<n;++i){if(!isInteger(y[i])||fabsl(y[i])>1e15L)return{};v[i]=llroundl(y[i]);}
+    for(int m:{2,3,4,5,6,7,8,9,10,12}){
+        struct Cls{vector<pair<ld,ld>>pts;bool ok=false;ld a=0,b=0;};
+        vector<Cls>cl(m);
+        for(int i=0;i+1<n;++i){int r=(int)(((v[i]%m)+m)%m);cl[r].pts.push_back({(ld)v[i],(ld)v[i+1]});}
+        bool good=true;int active=0;
+        for(int r=0;r<m&&good;++r){
+            auto&c=cl[r];if(c.pts.empty())continue;
+            ++active;
+            if(c.pts.size()<3){good=false;break;}
+            size_t i1=c.pts.size();
+            for(size_t q=1;q<c.pts.size();++q)if(c.pts[q].first!=c.pts[0].first){i1=q;break;}
+            if(i1==c.pts.size()){good=false;break;}
+            ld a=(c.pts[i1].second-c.pts[0].second)/(c.pts[i1].first-c.pts[0].first);
+            ld b=c.pts[0].second-a*c.pts[0].first;
+            for(const auto&pt:c.pts)if(fabsl(a*pt.first+b-pt.second)>1e-7L*max<ld>(1,fabsl(pt.second))){good=false;break;}
+            c.ok=true;c.a=a;c.b=b;
+        }
+        if(!good||active<2)continue;
+        bool distinct=false,first=true;ld a0=0,b0=0;
+        for(const auto&c:cl){if(!c.ok)continue;if(first){a0=c.a;b0=c.b;first=false;}else if(fabsl(c.a-a0)>1e-9L||fabsl(c.b-b0)>1e-9L)distinct=true;}
+        if(!distinct)continue;
+        vector<char>okv(m);vector<ld>av(m),bv(m);
+        for(int r=0;r<m;++r){okv[r]=cl[r].ok;av[r]=cl[r].a;bv[r]=cl[r].b;}
+        Model md;md.valid=md.exact=true;md.complexity=2*active;
+        const bool collatz=(m==2&&okv[0]&&okv[1]&&fabsl(av[0]-0.5L)<1e-9L&&fabsl(bv[0])<1e-9L&&fabsl(av[1]-3)<1e-9L&&fabsl(bv[1]-1)<1e-9L);
+        md.name=collatz?"Collatz (3n+1) trajectory":"Piecewise-affine modular map (mod "+to_string(m)+")";
+        md.category="Exact deterministic recurrence (modular map)";
+        ostringstream os;
+        if(collatz)os<<"y(n+1) = y(n)/2 if y(n) is even, 3*y(n)+1 if y(n) is odd";
+        else{os<<"y(n+1) = a_r*y(n)+b_r with r = y(n) mod "<<m<<": ";bool f=true;for(int r=0;r<m;++r){if(!okv[r])continue;if(!f)os<<"; ";f=false;os<<"r="<<r<<": "<<fmt(av[r],6)<<"*y+"<<fmt(bv[r],6);}}
+        md.formula=os.str();
+        const ld lastX=x.empty()?(ld)n:x.back();const ld lastY=y.back();
+        md.predict=[okv,av,bv,m,lastX,lastY](ld z){
+            long long steps=llroundl(z-lastX);if(steps<=0)return numeric_limits<ld>::quiet_NaN();
+            ld cur=lastY;
+            for(long long s=0;s<steps;++s){
+                if(!isInteger(cur)||fabsl(cur)>1e15L)return numeric_limits<ld>::quiet_NaN();
+                int r=(int)(((llroundl(cur)%m)+m)%m);
+                if(!okv[r])return numeric_limits<ld>::quiet_NaN();
+                cur=av[r]*cur+bv[r];
+            }
+            return cur;
+        };
+        md.fitted=y;md.nextValue=md.predict(lastX+1);
+        md.note="The data follows a rule that switches on the residue of the previous value. The forecast applies that rule step by step; it stops (NaN) if the trajectory reaches a residue class that never appeared in the data.";
+        return md;
+    }
+    return{};
+}
+
+// Linear recurrence with a constant term, order 1..4 (Fibonacci, Tribonacci, Pell, Padovan,
+// Jacobsthal, Mersenne-type 2y+1, ...). Smallest order that reproduces every term exactly.
+Model exactLinearRecurrenceK(const vector<ld>&x,const vector<ld>&y){
+    const int n=sizeToInt(y.size());
+    if(n<9)return{};
+    ld mn=*min_element(y.begin(),y.end()),mx=*max_element(y.begin(),y.end());
+    if(mx-mn<1e-12L)return{};
+    bool allInt=true;for(ld v:y)if(!isInteger(v)){allInt=false;break;}
+    ld sc=1;for(ld v:y)sc=max(sc,fabsl(v));
+    const ld tol=allInt?1e-9L*sc:max(ruleResidualTolerance(y),1e-9L*sc);
+    for(int k=1;k<=4;++k){
+        if(n-k<k+1+(allInt?4:6))break;
+        vector<vector<ld>>A;vector<ld>b;
+        for(int i=k;i<n;++i){vector<ld>row(k+1,1.0L);for(int j=1;j<=k;++j)row[j]=y[i-j];A.push_back(row);b.push_back(y[i]);}
+        vector<ld>c;if(!leastSquaresQR(A,b,c))continue;
+        if(allInt){bool intCoef=true;for(auto&q:c){if(fabsl(q-roundl(q))<1e-6L)q=roundl(q);else intCoef=false;}if(!intCoef)continue;}
+        ld worst=0;
+        for(int i=k;i<n;++i){ld p=c[0];for(int j=1;j<=k;++j)p+=c[j]*y[i-j];worst=max(worst,fabsl(p-y[i]));}
+        if(worst>tol)continue;
+        if(fabsl(c[k])<1e-9L)continue;
+        Model m;m.valid=m.exact=true;m.complexity=k+1;
+        m.name="Linear recurrence of order "+to_string(k)+(fabsl(c[0])>1e-9L?" with constant":"");
+        m.category="Exact recurrence algorithm";
+        ostringstream os;os<<"y(n) = ";bool f=true;
+        if(fabsl(c[0])>1e-9L){os<<fmt(c[0],8);f=false;}
+        for(int j=1;j<=k;++j){if(fabsl(c[j])<1e-12L)continue;if(!f)os<<" + ";f=false;os<<fmt(c[j],8)<<"*y(n-"<<j<<")";}
+        m.formula=os.str();
+        const ld lastX=x.empty()?(ld)n:x.back();vector<ld>tail(y.end()-k,y.end());
+        m.predict=[c,k,lastX,tail](ld z){
+            long long steps=llroundl(z-lastX);if(steps<=0)return numeric_limits<ld>::quiet_NaN();
+            vector<ld>w=tail;
+            for(long long s=0;s<steps;++s){ld p=c[0];for(int j=1;j<=k;++j)p+=c[j]*w[w.size()-j];if(!isfinite(p)||fabsl(p)>1e150L)return numeric_limits<ld>::quiet_NaN();w.push_back(p);}
+            return w.back();
+        };
+        m.fitted=y;m.nextValue=m.predict(lastX+1);
+        return m;
+    }
+    return{};
+}
+
+// Library of named integer sequences produced by short self-referential or arithmetic rules.
+struct GenSeq{string name,formula;int first;vector<ld>v;};
+const vector<GenSeq>& generatorLibrary(){
+    static const vector<GenSeq> lib=[](){
+        vector<GenSeq>L;const int N=6000;
+        auto add=[&](const string&nm,const string&fm,int first,vector<ld> vals){while(!vals.empty()&&!isfinite(vals.back()))vals.pop_back();if(vals.size()>=16)L.push_back({nm,fm,first,std::move(vals)});};
+        const ld NaN=numeric_limits<ld>::quiet_NaN();
+        auto cut=[&](vector<ld>&a,int from){return vector<ld>(a.begin()+from,a.end());};
+        { // Hofstadter Q
+            vector<ld>a(N+1,NaN);a[1]=a[2]=1;
+            for(int n=3;n<=N;++n){long long i1=n-(long long)a[n-1],i2=n-(long long)a[n-2];if(!isfinite(a[n-1])||!isfinite(a[n-2])||i1<1||i2<1||i1>=n||i2>=n)break;a[n]=a[i1]+a[i2];}
+            add("Hofstadter Q-sequence","Q(n) = Q(n-Q(n-1)) + Q(n-Q(n-2)), Q(1)=Q(2)=1",1,cut(a,1));
+        }
+        { // Hofstadter-Conway $10000
+            vector<ld>a(N+1,NaN);a[1]=a[2]=1;
+            for(int n=3;n<=N;++n){long long p=(long long)a[n-1];if(!isfinite(a[n-1])||p<1||p>=n)break;a[n]=a[p]+a[n-p];}
+            add("Hofstadter-Conway $10000 sequence","a(n) = a(a(n-1)) + a(n-a(n-1)), a(1)=a(2)=1",1,cut(a,1));
+        }
+        { // Golomb
+            vector<ld>g(N+1,NaN);g[1]=1;
+            for(int n=2;n<=N;++n){long long p=(long long)g[n-1];if(!isfinite(g[n-1])||p<1||p>=n)break;long long q=(long long)g[p];if(q<1||q>=n)break;g[n]=1+g[n-q];}
+            add("Golomb's sequence","a(n) = 1 + a(n - a(a(n-1))), a(1)=1",1,cut(g,1));
+        }
+        { // Hofstadter G
+            vector<ld>g(N+1,NaN);g[0]=0;
+            for(int n=1;n<=N;++n){long long p=(long long)g[n-1];if(!isfinite(g[n-1])||p<0||p>=n)break;g[n]=n-g[p];}
+            add("Hofstadter G-sequence","G(n) = n - G(G(n-1)), G(0)=0",0,g);
+        }
+        { // Hofstadter H
+            vector<ld>h(N+1,NaN);h[0]=0;
+            for(int n=1;n<=N;++n){long long p=(long long)h[n-1];if(!isfinite(h[n-1])||p<0||p>=n)break;long long q=(long long)h[p];if(q<0||q>=n)break;long long r=(long long)h[q];if(r<0||r>=n)break;h[n]=n-h[r];}
+            add("Hofstadter H-sequence","H(n) = n - H(H(H(n-1))), H(0)=0",0,h);
+        }
+        { // Recaman
+            vector<ld>a(N+1);a[0]=0;set<long long>seen{0};
+            for(int n=1;n<=N;++n){long long cand=(long long)a[n-1]-n;if(cand>0&&!seen.count(cand))a[n]=cand;else a[n]=a[n-1]+n;seen.insert((long long)a[n]);}
+            add("Recaman's sequence","a(n) = a(n-1)-n if that is positive and new, otherwise a(n-1)+n; a(0)=0",0,a);
+        }
+        { // divisor count, sigma, phi, mobius, largest prime factor
+            vector<ld>d(N+1,0),sg(N+1,0),ph(N+1,0),mu(N+1,1),lpf(N+1,0);vector<int>spf(N+1,0);
+            for(int i=1;i<=N;++i)for(int j=i;j<=N;j+=i){d[j]+=1;sg[j]+=i;}
+            for(int i=0;i<=N;++i)ph[i]=i;
+            for(int p=2;p<=N;++p)if(!spf[p]){for(int j=p;j<=N;j+=p){if(!spf[j])spf[j]=p;ph[j]-=ph[j]/p;lpf[j]=p;mu[j]=-mu[j];}for(long long q=(long long)p*p;q<=N;q+=(long long)p*p)mu[(size_t)q]=0;}
+            add("Divisor-count function d(n)","number of divisors of n",1,cut(d,1));
+            add("Sum-of-divisors function sigma(n)","sum of the divisors of n",1,cut(sg,1));
+            add("Euler totient phi(n)","count of 1<=k<=n coprime to n",1,cut(ph,1));
+            add("Moebius function mu(n)","0 if n has a squared prime factor, else (-1)^(number of prime factors)",1,cut(mu,1));
+            add("Largest prime factor of n","largest prime dividing n",2,cut(lpf,2));
+            vector<ld>pi(N+1,0);for(int i=2;i<=N;++i)pi[i]=pi[i-1]+(spf[i]==i?1:0);
+            add("Prime-counting function pi(n)","number of primes <= n",1,cut(pi,1));
+        }
+        { // binary / digit functions
+            vector<ld>pc(N+1),tm(N+1),ds(N+1),gc(N+1),st(N+2,0);
+            for(int i=0;i<=N;++i){pc[i]=__builtin_popcount((unsigned)i);tm[i]=(int)pc[i]%2;int s=0,t=i;while(t){s+=t%10;t/=10;}ds[i]=s;gc[i]=i^(i>>1);}
+            st[0]=0;st[1]=1;for(int n=2;n<=N;++n)st[n]=(n%2==0)?st[n/2]:st[n/2]+st[n/2+1];
+            add("Binary weight (popcount)","number of 1 bits in n",0,pc);
+            add("Thue-Morse sequence","parity of the number of 1 bits of n",0,tm);
+            add("Decimal digit sum","sum of the decimal digits of n",0,ds);
+            add("Gray code","n XOR (n >> 1)",0,gc);
+            add("Stern's diatomic sequence","s(2n)=s(n), s(2n+1)=s(n)+s(n+1), s(0)=0, s(1)=1",0,vector<ld>(st.begin(),st.begin()+N+1));
+            vector<ld>jo(N+1,0);for(int n=1;n<=N;++n){int p=1;while(p*2<=n)p*=2;jo[n]=2*(n-p)+1;}
+            add("Josephus problem J(n), k=2","J(n) = 2(n-2^floor(log2 n))+1",1,cut(jo,1));
+        }
+        { // Collatz total stopping time
+            vector<ld>ct(N+1,0);
+            for(int n=2;n<=N;++n){long long v=n;int steps=0;while(v!=1&&steps<2000){v=(v%2==0)?v/2:3*v+1;++steps;}ct[n]=steps;}
+            add("Collatz stopping time","number of 3n+1 steps for n to reach 1",1,cut(ct,1));
+        }
+        { // partitions p(n)
+            const int P=1500;vector<ld>p(P+1,0);p[0]=1;
+            for(int k=1;k<=P;++k)for(int n=k;n<=P;++n)p[n]+=p[n-k];
+            add("Integer partition numbers p(n)","number of partitions of n",0,p);
+        }
+        { // Kolakoski
+            vector<int>k={1,2,2};size_t i=2;int next=1;
+            while((int)k.size()<N){int run=k[i];for(int r=0;r<run&&(int)k.size()<N;++r)k.push_back(next);next=3-next;++i;}
+            vector<ld>kv(k.begin(),k.end());
+            add("Kolakoski sequence","sequence of 1s and 2s that is its own run-length encoding",1,kv);
+        }
+        return L;
+    }();
+    return lib;
+}
+
+Model exactGeneratorLibrary(const vector<ld>&x,const vector<ld>&y){
+    const int n=sizeToInt(y.size());
+    if(n<9)return{};
+    ld mn=*min_element(y.begin(),y.end()),mx=*max_element(y.begin(),y.end());
+    if(mx-mn<1e-12L)return{};
+    for(const auto&g:generatorLibrary()){
+        for(int s=g.first;s<=g.first+4;++s){
+            const int off=s-g.first;
+            if(off+n>(int)g.v.size())continue;
+            bool ok=true;
+            for(int i=0;i<n;++i)if(!approxEqual(y[i],g.v[off+i],1e-9L,1e-9L)){ok=false;break;}
+            if(!ok)continue;
+            Model m;m.valid=m.exact=true;m.name=g.name;m.category="Exact self-referential / arithmetic sequence";
+            m.formula=g.formula+" (observations start at n="+to_string(s)+")";m.complexity=3;
+            const ld x0=x.empty()?1.0L:x.front();const vector<ld>vals=g.v;
+            m.predict=[vals,off,x0](ld z){long long idx=off+llroundl(z-x0);if(idx<0||idx>=(long long)vals.size())return numeric_limits<ld>::quiet_NaN();return vals[(size_t)idx];};
+            m.fitted=y;m.nextValue=m.predict((x.empty()?(ld)n:x.back())+1);
+            m.note="Matched against a built-in library of well-known sequences; the forecast runs the defining rule rather than fitting a curve.";
+            return m;
+        }
+    }
+    return{};
+}
+
+// Wall-clock budget (seconds) for the candidate sweep. The cheap families are evaluated first, so a
+// long series that exhausts the budget still returns the best model found so far.
+static double g_sweepBudgetSeconds=25.0;
+static bool g_lastBudgetHit=false;
+
+Analysis analyzeSequenceCoreImpl(const vector<ld>&x,const vector<ld>&y,int horizon,ld requestedTolerancePct=-1.0L){
     Analysis a;
     if(y.size()<3||x.size()!=y.size()||horizon<1)return a;
     a.tolerancePct=requestedTolerancePct>=0?requestedTolerancePct:adaptiveTolerancePct(y);
@@ -3410,8 +3886,9 @@ Analysis analyzeSequenceCore(const vector<ld>&x,const vector<ld>&y,int horizon,l
         exact.push_back(exactAP(x,y));exact.push_back(exactGP(x,y));exact.push_back(exactFactorial(x,y));
         exact.push_back(exactFibonacci(x,y));exact.push_back(exactRecurrence2(x,y));exact.push_back(exactPowerFamily(x,y));
         exact.push_back(exactCatalan(x,y));exact.push_back(exactBell(x,y));exact.push_back(exactPrimeSequence(x,y));
-        exact.push_back(exactPolygonal(x,y));exact.push_back(exactPeriodic(x,y));exact.push_back(exactEventualCycle(x,y));
-        exact.push_back(exactInterleaved(x,y));exact.push_back(detectLCG(x,y));exact.push_back(detectXorShift32(x,y));
+        exact.push_back(exactPolygonal(x,y));exact.push_back(exactPeriodic(x,y));
+        exact.push_back(exactGeneratorLibrary(x,y));exact.push_back(exactModularAffineMap(x,y));exact.push_back(exactLinearRecurrenceK(x,y));exact.push_back(exactIteratedMap(x,y));
+        exact.push_back(exactEventualCycle(x,y));exact.push_back(exactInterleaved(x,y));exact.push_back(detectLCG(x,y));exact.push_back(detectXorShift32(x,y));
         exact.push_back(exactPermutation(y));exact.push_back(exactDistinctIntegerSet(y));
         exact.push_back(exactAffine(x,y));
         exact.push_back(exactStaircase(x,y));
@@ -3487,45 +3964,110 @@ Analysis analyzeSequenceCore(const vector<ld>&x,const vector<ld>&y,int horizon,l
         }
         auto preds=forecastFromModel(m,x.back(),horizon);
         if(preds.size()!=static_cast<size_t>(horizon))continue;
-        a.found=true;a.deterministicNext=true;a.category=m.category;a.logic="Exact algorithmic rule validated against every supplied observation.";a.formula=m.formula;a.evidenceScore=100;a.model=m;a.predictions=preds;a.nextValue=preds.front();attachNumericRoots(a.model,x,true);return a;
+        a.found=true;a.deterministicNext=true;a.category=m.category;a.logic="Exact algorithmic rule validated against every supplied observation.";a.formula=m.formula;a.evidenceScore=100;a.model=m;a.predictions=preds;a.nextValue=preds.front();if(!m.note.empty())a.warning=m.note;attachNumericRoots(a.model,x,true);return a;
     }
 
-    // Calculus-driven piecewise-linear regime path.  This comes before global
-    // polynomial/model selection so control-system style ramps, holds, falls,
-    // lifts and domain changes are represented as separate local rules rather than
-    // being misclassified as one smooth law.
+    // Fast algebraic curve path: when a low-degree polynomial explains the entire
+    // supplied curve to numerical precision, prefer it before anything heuristic.
+    // The SMALLEST degree that reaches numerical precision wins, and a degree is
+    // only eligible while at least 3 spare degrees of freedom remain -- otherwise
+    // a high-degree fit "explains" any short data set by interpolation alone.
+    // This runs for unit-spaced and arbitrary x grids alike.
+    if(y.size()>=8){
+        for(int deg=1;deg<=6;++deg){
+            if((int)y.size()<deg+4)break;
+            Model pm=fitPolyModel(x,y,deg);if(!pm.valid||!pm.predict)continue;
+            auto [rms,mae]=errorMetrics(y,pm.fitted);ld rel=rms/max<ld>(robustScale(y),1e-9L);
+            if(rel<1e-8L){
+                pm.metrics.rmse=rms;pm.metrics.mae=mae;pm.metrics.r2=1;pm.metrics.score=100;pm.exact=true;
+                a.model=pm;a.found=true;a.deterministicNext=true;a.evidenceScore=100;a.category=pm.category;
+                a.logic="Low-degree polynomial relation (smallest degree that reproduces every observation to numerical precision); bypassed the generic model search.";
+                a.formula=pm.formula;a.predictions=forecastFromModel(pm,x.back(),horizon);
+                a.nextValue=a.predictions.empty()?pm.nextValue:a.predictions.front();
+                attachNumericRoots(a.model,x,true);return a;
+            }
+        }
+    }
+
+    // Best smooth (closed-form) explanation of the whole series. It is the yardstick the
+    // heuristic piecewise / shape routes must beat, and it doubles as an exact shortcut
+    // when some parametric family reproduces every observation to numerical precision.
+    struct SmoothBase{ld rel=numeric_limits<ld>::infinity();Model model;};
+    struct SmoothCand{FamilySpec spec;Model model;ld rel=0;ld aicc=0;};
+    SmoothBase base;
+    vector<SmoothCand> baseCands;
+    {
+        const int bn=sizeToInt(y.size());
+        const ld bscale=max<ld>(robustScale(y),1e-9L);
+        const ld varFloor=(1e-10L*bscale)*(1e-10L*bscale);
+        auto consider=[&](const Model&sm,const FamilySpec&sp){
+            if(!sm.valid||!sm.predict||bn<sm.complexity+4)return;
+            auto fv=finiteFitted(sm,x,y);
+            ld rmse=errorMetrics(y,fv).first;
+            ld r=rmse/bscale;
+            if(!isfinite(r))return;
+            if(r<base.rel){base.rel=r;base.model=sm;}
+            const ld k=max(1,sm.complexity);
+            ld aicc=numeric_limits<ld>::infinity();
+            if((ld)bn-k-1.0L>0)aicc=(ld)bn*logl(max<ld>(rmse*rmse,varFloor))+2.0L*k+2.0L*k*(k+1.0L)/((ld)bn-k-1.0L);
+            baseCands.push_back({sp,sm,r,aicc});
+        };
+        for(int deg=1;deg<=4;++deg)consider(fitPolyModel(x,y,deg),FamilySpec{"poly",deg,0});
+        if(y.size()>=24){consider(fitMultiToneModel(x,y,2),FamilySpec{"multitone",2,0});consider(fitMultiToneModel(x,y,3),FamilySpec{"multitone",3,0});}
+        consider(fitExpModel(x,y),FamilySpec{"exp",1,0});consider(fitLogModel(x,y),FamilySpec{"log",1,0});consider(fitPowerModel(x,y),FamilySpec{"power",1,0});
+        consider(fitRationalModel(x,y,1),FamilySpec{"rational",1,0});consider(fitBestSingleFeatureModel(x,y),FamilySpec{"single_feature",1,0});
+        consider(fitShiftedExponentialLocal(x,y),FamilySpec{"exp_offset",1,0});
+        if(y.size()>=12&&base.rel>1e-7L){
+            ld dxm=1;{vector<ld>dd;for(size_t i=1;i<x.size();++i)if(x[i]>x[i-1])dd.push_back(x[i]-x[i-1]);if(!dd.empty())dxm=quantile(dd,.5L);}
+            vector<int> pc=dftDominantPeriods(y,2);
+            for(int pp:detectPeriodicCandidates(x,y))pc.push_back(pp);
+            {vector<int>ded;for(int pp:pc)if(find(ded.begin(),ded.end(),pp)==ded.end())ded.push_back(pp);pc.swap(ded);} // keep strongest-first order
+            int used=0;
+            for(int pp:pc){
+                if(pp<2||used>=3)continue;++used;
+                ld w=refineSinusoidFrequency(x,y,2*PI/(pp*dxm));if(!(w>0))continue;
+                consider(fitSinusoidModel(x,y,w),FamilySpec{"sin",1,w});
+                consider(fitFourierModel(x,y,2*PI/w,2),FamilySpec{"fourier",2,2*PI/w});
+                auto wa=refineDampedSinusoid(x,y,w);if(wa.first>0)consider(fitDampedSinusoidModel(x,y,wa.first,wa.second),FamilySpec{"damped_sine",1,wa.first,wa.second});
+            }
+        }
+    }
+    if(base.model.valid&&base.rel<1e-7L){
+        Model bm=base.model;bm.exact=true;bm.metrics.score=100;bm.metrics.r2=1;bm.metrics.rmse=base.rel*max<ld>(robustScale(y),1e-9L);
+        auto bp=forecastFromModel(bm,x.back(),horizon);
+        if(bp.size()==static_cast<size_t>(horizon)&&!absurdPrediction(bm,y,bp)){
+            a.model=bm;a.found=true;a.deterministicNext=true;a.evidenceScore=100;a.category=bm.category;
+            a.logic="A closed-form parametric family reproduces every observation to numerical precision (with spare degrees of freedom); bypassed the generic model search.";
+            a.formula=bm.formula;a.predictions=bp;a.nextValue=bp.front();
+            attachNumericRoots(a.model,x,true);return a;
+        }
+    }
+
+    // Calculus-driven piecewise-linear regime path (ramps, holds, steps, kinks).
+    // It only wins when it is a MUCH better explanation than every smooth family
+    // tried here; otherwise a smooth curve (parabola, sqrt, log, ...) that merely
+    // has a changing slope would be chopped into straight pieces.
     {
         Model regime=fitPiecewiseLinearRegimeModel(x,y);
         if(regime.valid&&regime.predict){
             auto [rrms,rmae]=errorMetrics(y,regime.fitted);
             ld scale=max<ld>(robustScale(y),1e-9L);
             auto rp=forecastFromModel(regime,x.back(),horizon);
-            if(rrms/scale<0.18L && rp.size()==static_cast<size_t>(horizon) && !absurdPrediction(regime,y,rp)){
+            const ld smoothRel=base.rel;
+            const ld regimeRel=rrms/scale;
+            const bool structurallyBetter=(regimeRel<0.5L*smoothRel)||(smoothRel>0.06L);
+            if(regimeRel<0.05L && structurallyBetter && rp.size()==static_cast<size_t>(horizon) && !absurdPrediction(regime,y,rp)){
                 regime.window=sizeToInt(y.size());
                 regime.metrics.rmse=rrms;regime.metrics.mae=rmae;regime.metrics.r2=r2Score(y,regime.fitted);
-                regime.metrics.normalizedRMSE=rrms/scale;regime.metrics.score=clamp01(1.0L/(1.0L+rrms/scale))*82.0L;
+                regime.metrics.normalizedRMSE=regimeRel;regime.metrics.score=clamp01(1.0L/(1.0L+regimeRel))*82.0L;
                 regime.nextValue=rp.front();
                 a.model=regime;a.predictions=rp;a.nextValue=rp.front();a.found=true;a.deterministicNext=false;a.shapeBased=true;
+                a.evidenceScore=regime.metrics.score;
                 a.category=regime.name;a.formula=regime.formula;
                 a.logic="Derivative-segmented calculus route: local first-derivative regimes, flat holds and slope changes were detected as domain boundaries; each domain was fitted separately and the final domain was extrapolated.";
                 a.warning="The domain segmentation is evidence-based. A future regime change can only be predicted when its timing/pattern is supported by repeated observed regimes.";
                 attachNumericRoots(a.model,x,true);return a;
             }
-        }
-    }
-
-    // Fast algebraic curve path: when a low-degree polynomial explains the entire
-    // supplied curve to numerical precision, prefer it before expensive rolling
-    // model selection. This is especially useful for multi-root curves.
-    if(!unitGrid && y.size()>=8){
-        Model bestPoly; ld bestRel=numeric_limits<ld>::infinity();
-        for(int deg=1;deg<=6;++deg){
-            Model pm=fitPolyModel(x,y,deg);if(!pm.valid||!pm.predict)continue;
-            auto [rms,mae]=errorMetrics(y,pm.fitted);ld rel=rms/max<ld>(robustScale(y),1e-9L);
-            if(rel<bestRel){bestRel=rel;bestPoly=pm;bestPoly.metrics.rmse=rms;bestPoly.metrics.mae=mae;}
-        }
-        if(bestPoly.valid&&bestRel<1e-8L){
-            a.model=bestPoly;a.found=true;a.deterministicNext=true;a.category=bestPoly.category;a.logic="Low-degree polynomial relation validated to numerical precision; bypassed generic model search.";a.formula=bestPoly.formula;a.predictions=forecastFromModel(bestPoly,x.back(),horizon);a.nextValue=a.predictions.empty()?bestPoly.nextValue:a.predictions.front();attachNumericRoots(a.model,x,true);return a;
         }
     }
 
@@ -3535,7 +4077,11 @@ Analysis analyzeSequenceCore(const vector<ld>&x,const vector<ld>&y,int horizon,l
     if(!strongBreaks.empty()&&strongBreaks.size()<=3){
         Model pw=fitPiecewiseForcedCuts(x,y,strongBreaks);
         if(!pw.valid)pw=fitPiecewiseAdaptiveModel(x,y,2);
-        if(pw.valid&&pw.predict){auto pp=forecastFromModel(pw,x.back(),horizon);if(pp.size()==static_cast<size_t>(horizon)&&!absurdPrediction(pw,y,pp)){
+        ld pwRel=numeric_limits<ld>::infinity();
+        if(pw.valid&&pw.predict)pwRel=errorMetrics(y,finiteFitted(pw,x,y)).first/max<ld>(robustScale(y),1e-9L);
+        const bool pwBetter=(pwRel<0.5L*base.rel)||(base.rel>0.06L);
+        if(pw.valid&&pw.predict&&pwBetter){auto pp=forecastFromModel(pw,x.back(),horizon);if(pp.size()==static_cast<size_t>(horizon)&&!absurdPrediction(pw,y,pp)){
+            pw.metrics.score=clamp01(1.0L/(1.0L+pwRel))*70.0L;a.evidenceScore=pw.metrics.score;
             pw.window=sizeToInt(y.size());a.model=pw;a.predictions=pp;a.nextValue=pp.front();a.found=true;a.deterministicNext=false;a.shapeBased=true;a.category=pw.name;a.formula=pw.formula;
             a.logic="Piecewise route: isolated discontinuities and/or statistically strong left/right derivative changes were detected; the domain was segmented and each segment received its own local model.";
             a.warning="The segmentation is evidence-based rather than a proof of the underlying generating function; the final segment is extrapolated forward.";
@@ -3543,7 +4089,7 @@ Analysis analyzeSequenceCore(const vector<ld>&x,const vector<ld>&y,int horizon,l
     }
 
     // First try a nonstationary oscillation model when extrema spacing itself changes.
-    if(a.observedTurningPoints.size()>=7){
+    if(a.observedTurningPoints.size()>=7&&base.rel>0.06L){
         Model chirp=fitAdaptiveChirpEnvelopeModel(x,y);
         if(chirp.valid&&chirp.predict){
             auto [crms,cmae]=errorMetrics(y,chirp.fitted);ld scale=max<ld>(robustScale(y),1e-9L);
@@ -3563,7 +4109,7 @@ Analysis analyzeSequenceCore(const vector<ld>&x,const vector<ld>&y,int horizon,l
     // extrema pattern through a straight-line winner merely because early folds
     // are harder than the latest cycle. It also dramatically reduces runtime on
     // long oscillatory curves.
-    if(a.observedTurningPoints.size()>=5){
+    if(a.observedTurningPoints.size()>=5&&base.rel>0.06L){
         ld ep=estimateExtremaPeriod(x,y);
         Model shape=fitOscillatoryEnvelopeModel(x,y,ep);
         if(shape.valid&&shape.predict){
@@ -3581,15 +4127,62 @@ Analysis analyzeSequenceCore(const vector<ld>&x,const vector<ld>&y,int horizon,l
         }
     }
 
+    // Fast validated path: the best (lowest AICc) smooth candidate gets one rolling-origin
+    // validation at the requested horizon. If it is stable it is accepted straight away;
+    // only otherwise does the exhaustive family sweep below run.
+    if(!baseCands.empty()&&y.size()>=14){
+        size_t bi=0;for(size_t i=1;i<baseCands.size();++i)if(baseCands[i].aicc<baseCands[bi].aicc)bi=i;
+        // models within 4 AICc units of the best are statistically equivalent: take the simplest
+        {
+            const ld bestAicc=baseCands[bi].aicc;size_t pick=bi;
+            for(size_t i=0;i<baseCands.size();++i){
+                if(!isfinite(baseCands[i].aicc)||baseCands[i].aicc>bestAicc+4.0L)continue;
+                if(baseCands[i].model.complexity<baseCands[pick].model.complexity||
+                   (baseCands[i].model.complexity==baseCands[pick].model.complexity&&baseCands[i].aicc<baseCands[pick].aicc))pick=i;
+            }
+            bi=pick;
+        }
+        const auto&bc=baseCands[bi];
+        const int nn0=sizeToInt(y.size());
+        int w=max(8,(int)llroundl(0.7L*nn0));if(w>nn0-2)w=nn0-2;
+        if(isfinite(bc.aicc)&&w>=8){
+            ChunkValidation cv=validateRolling(x,y,bc.spec,w,a.tolerancePct,requestedTolerancePct>=0,horizon);
+            if(cv.ok&&cv.metrics.stable&&cv.metrics.score>=60.0L){
+                Model fm=bc.model;fm.window=nn0;fm.metrics=cv.metrics;fm.validationResiduals=cv.residuals;fm.fitted=finiteFitted(fm,x,y);
+                auto pr=forecastFromModel(fm,x.back(),horizon);
+                if(pr.size()==static_cast<size_t>(horizon)&&!absurdPrediction(fm,y,pr)){
+                    fm.nextValue=pr.front();
+                    a.model=fm;a.leaderboard={fm};a.found=true;a.deterministicNext=true;a.category=fm.name;a.evidenceScore=fm.metrics.score;
+                    a.logic="Closed-form candidates were ranked by AICc and the best one passed rolling-origin validation at the requested forecast horizon (accepted without the exhaustive sweep).";
+                    a.formula=fm.formula;a.predictions=pr;a.nextValue=pr.front();
+                    attachNumericRoots(a.model,x,true);
+                    auto half=empiricalForecastBand(a.predictions,a.model.validationResiduals,0.90L);
+                    if(half.size()==a.predictions.size()){a.predictionLow.resize(horizon);a.predictionHigh.resize(horizon);for(int i=0;i<horizon;++i){a.predictionLow[i]=a.predictions[i]-half[i];a.predictionHigh[i]=a.predictions[i]+half[i];}}
+                    return a;
+                }
+            }
+        }
+    }
+
     vector<FamilySpec>specs=makeSpecs(x,y);
     vector<Model>scored;
     const int n=sizeToInt(y.size());
     vector<int>windows=candidateWindows(n);
+    const auto sweepStart=chrono::steady_clock::now();
+    bool budgetHit=false;
+    auto overBudget=[&](){return chrono::duration<double>(chrono::steady_clock::now()-sweepStart).count()>g_sweepBudgetSeconds;};
+    g_lastBudgetHit=false;
+    // cheap families first, heavy refinement families last
+    stable_sort(specs.begin(),specs.end(),[](const FamilySpec&A,const FamilySpec&B){
+        auto cost=[](const string&f){return (f=="multitone"||f=="damped_sine"||f=="chirp"||f=="rbf"||f=="symbolic"||f=="root_poly"||f=="segmented"||f=="piecewise_adaptive"||f=="osc_envelope"||f=="adaptive_chirp_envelope"||f=="single_feature"||f=="exp_offset"||f=="huber_basis"||f=="elastic_basis"||f=="lasso_basis")?1:0;};
+        return cost(A.family)<cost(B.family);
+    });
 
     auto familyExpensive=[](const string&f){
-        return f=="single_feature"||f=="symbolic"||f=="rbf"||f=="chirp"||f=="damped_sine"||f=="root_poly"||f=="segmented"||f=="piecewise_adaptive"||f=="seasonal"||f=="periodic_delta"||f=="osc_envelope"||f=="adaptive_chirp_envelope"||f=="huber_basis"||f=="elastic_basis"||f=="lasso_basis";
+        return f=="single_feature"||f=="symbolic"||f=="rbf"||f=="chirp"||f=="damped_sine"||f=="multitone"||f=="exp_offset"||f=="root_poly"||f=="segmented"||f=="piecewise_adaptive"||f=="seasonal"||f=="periodic_delta"||f=="osc_envelope"||f=="adaptive_chirp_envelope"||f=="huber_basis"||f=="elastic_basis"||f=="lasso_basis";
     };
     for(const auto&spec:specs){
+        if(overBudget()){budgetHit=true;break;}
         vector<int>evalWindows=windows;
         if(familyExpensive(spec.family) && evalWindows.size()>4){
             vector<int>reduced;
@@ -3600,12 +4193,15 @@ Analysis analyzeSequenceCore(const vector<ld>&x,const vector<ld>&y,int horizon,l
             if(!reduced.empty()) evalWindows.swap(reduced);
         }
         for(int w:evalWindows){
+            if(overBudget()){budgetHit=true;break;}
             if(w<8||w>n-1)continue;
-            ChunkValidation cv=validateRolling(x,y,spec,w,a.tolerancePct,requestedTolerancePct>=0);
+            ChunkValidation cv=validateRolling(x,y,spec,w,a.tolerancePct,requestedTolerancePct>=0,horizon);
             if(!cv.ok)continue;
             vector<ld>tx(x.end()-w,x.end()),ty(y.end()-w,y.end());
             Model fm=fitByFamily(spec.family,tx,ty,spec.degree,spec.param,spec.param2);
             if(!fm.valid||!fm.predict)continue;
+            // at least 3 observations per free parameter in the training window
+            if(!isRegularizedFamily(spec.family)&&fm.complexity*3>w)continue;
             fm.window=w;fm.metrics=cv.metrics;fm.validationResiduals=cv.residuals;
             vector<ld>pred=forecastFromModel(fm,x.back(),horizon);
             if(pred.size()!=static_cast<size_t>(horizon))continue;
@@ -3615,6 +4211,7 @@ Analysis analyzeSequenceCore(const vector<ld>&x,const vector<ld>&y,int horizon,l
         }
     }
 
+    g_lastBudgetHit=budgetHit;
     if(scored.empty()){
         a.found=false;a.deterministicNext=false;a.category="No validated predictive pattern";
         a.logic="All exact rules and machine-learning/statistical candidates were rejected by rolling unseen-data validation or stability checks.";
@@ -3628,6 +4225,21 @@ Analysis analyzeSequenceCore(const vector<ld>&x,const vector<ld>&y,int horizon,l
         if(A.complexity!=B.complexity)return A.complexity<B.complexity;
         return A.name<B.name;
     });
+    {
+        // Parsimony rule: a model that is statistically indistinguishable from the best
+        // (within 1.5 score points) but has fewer parameters is the better explanation.
+        const ld top=scored.front().metrics.score;
+        // The noisier the validation errors, the less a few score points mean, so the
+        // band widens with the winner's p90 deviation (1.5 points for near-exact fits).
+        const ld band=clamp(1.5L+1.2L*scored.front().metrics.p90DeviationPct,1.5L,8.0L);
+        size_t pick=0;
+        for(size_t i=1;i<scored.size();++i){
+            if(scored[i].metrics.score<top-band)continue;
+            if(!scored[i].metrics.stable&&scored[pick].metrics.stable)continue;
+            if(scored[i].complexity<scored[pick].complexity)pick=i;
+        }
+        if(pick!=0){Model chosen=scored[pick];scored.erase(scored.begin()+pick);scored.insert(scored.begin(),chosen);}
+    }
 
     // Consensus ensemble: use only top independently rolling-validated models,
     // and only when their forecasts are reasonably close. This avoids blindly
@@ -3723,6 +4335,16 @@ Analysis analyzeSequenceCore(const vector<ld>&x,const vector<ld>&y,int horizon,l
     return a;
 }
 
+Analysis analyzeSequenceCore(const vector<ld>&x,const vector<ld>&y,int horizon,ld requestedTolerancePct=-1.0L){
+    Analysis a=analyzeSequenceCoreImpl(x,y,horizon,requestedTolerancePct);
+    if(a.found&&a.evidenceScore<=0&&a.model.metrics.score>0)a.evidenceScore=a.model.metrics.score;
+    if(g_lastBudgetHit){
+        const string note="Search time budget reached: the slowest model families were only partly evaluated, so a better model may exist.";
+        a.warning=a.warning.empty()?note:(a.warning+" "+note);
+    }
+    return a;
+}
+
 // Re-expresses an Analysis that was actually computed on the sign-mirrored
 // series (-y) back in terms of the original series, by negating every
 // number it produced (predictions, band, fitted values, and each callable
@@ -3765,7 +4387,9 @@ Analysis negateAnalysisForMirror(Analysis a) {
 // underside) are much easier to validate on -y than on y directly, even
 // though the two are mathematically equivalent up to a sign flip.
 Analysis analyzeSequence(const vector<ld>&x,const vector<ld>&y,int horizon,ld requestedTolerancePct=-1.0L,bool allowMirror=true){
+    const auto t0=chrono::steady_clock::now();
     Analysis direct = analyzeSequenceCore(x,y,horizon,requestedTolerancePct);
+    if(chrono::duration<double>(chrono::steady_clock::now()-t0).count()>8.0) return direct;
     // The mirror pass reruns the entire search, so for performance it is only
     // worth paying for when the direct fit is not already strong -- an
     // already-confident fit is very unlikely to be beaten by its own mirror.
@@ -3858,7 +4482,7 @@ bool validateVARRolling(const vector<vector<ld>>& rows,int lag,ld lambda,ld tol,
     ld wr=0,wm=0,wr2=0,wh=0,wsm=0,sumAbs=0,sumErr=0;
     for(size_t i=0;i<allA.size();++i){sumAbs+=fabsl(allA[i]);sumErr+=fabsl(allA[i]-allP[i]);}
     for(auto&b:blocks){int w=max(1,b.nValid);total+=w;wr+=b.rmse*w;wm+=b.mae*w;wr2+=b.r2*w;wh+=b.hitRate*w;wsm+=b.smapePct*w;if(b.blockPassRate>0.5L)++passed;}
-    Metrics m;m.nTrain=blocks.front().nTrain;m.nValid=total;m.validationBlocks=blocks.size();m.rmse=wr/total;m.mae=wm/total;m.r2=wr2/total;m.hitRate=wh/total;m.smapePct=wsm/total;m.meanDeviationPct=meanOf(allD);m.medianDeviationPct=quantile(allD,.5L);m.p90DeviationPct=quantile(allD,.9L);m.maxDeviationPct=*max_element(allD.begin(),allD.end());m.wapePct=100.0L*sumErr/max<ld>(sumAbs,1e-12L);m.blockPassRate=(ld)passed/blocks.size();m.normalizedRMSE=m.rmse; m.rollingValidated=true;
+    Metrics m;m.nTrain=blocks.front().nTrain;m.nValid=total;m.validationBlocks=blocks.size();m.rmse=wr/total;m.mae=wm/total;m.r2=r2Score(allA,allP);m.hitRate=wh/total;m.smapePct=wsm/total;m.meanDeviationPct=meanOf(allD);m.medianDeviationPct=quantile(allD,.5L);m.p90DeviationPct=quantile(allD,.9L);m.maxDeviationPct=*max_element(allD.begin(),allD.end());m.wapePct=100.0L*sumErr/max<ld>(sumAbs,1e-12L);m.blockPassRate=(ld)passed/blocks.size();m.normalizedRMSE=m.rmse; m.rollingValidated=true;
     m.stable=strict?(m.p90DeviationPct<=tol&&m.blockPassRate>=.70L):(m.medianDeviationPct<=tol&&m.p90DeviationPct<=2*tol&&m.blockPassRate>=.60L);
     m.scoreRMSE=1/(1+m.normalizedRMSE);m.scoreMAE=1/(1+m.wapePct/100);m.scoreP90=expl(-m.p90DeviationPct/max<ld>(tol,1e-6L));m.scoreR2=clamp01(m.r2);m.scoreDirection=.5L;m.scoreCorrelation=.5L;m.scoreStability=m.blockPassRate;m.scoreComplexity=1/sqrtl(1+.03L*max(1,lag));m.score=100*powl(max<ld>(1e-18L,m.scoreRMSE*m.scoreMAE*m.scoreP90*max<ld>(1e-6L,m.scoreR2)*m.scoreStability*m.scoreComplexity),1.0L/6.0L);
     finalModel.metrics=m;return true;
@@ -3870,7 +4494,7 @@ RelationAnalysis analyzeRelation(const vector<ld>&x,const vector<ld>&y,const vec
     a.tolerancePct=requestedTolerancePct>=0?requestedTolerancePct:adaptiveTolerancePct(y);
     vector<FamilySpec>specs=makeSpecs(x,y);vector<Model>scored;vector<int>windows=candidateWindows(sizeToInt(y.size()));
     auto familyExpensive=[](const string&f){
-        return f=="single_feature"||f=="symbolic"||f=="rbf"||f=="chirp"||f=="damped_sine"||f=="root_poly"||f=="segmented"||f=="piecewise_adaptive"||f=="seasonal"||f=="periodic_delta"||f=="huber_basis"||f=="elastic_basis"||f=="lasso_basis";
+        return f=="single_feature"||f=="symbolic"||f=="rbf"||f=="chirp"||f=="damped_sine"||f=="multitone"||f=="exp_offset"||f=="root_poly"||f=="segmented"||f=="piecewise_adaptive"||f=="seasonal"||f=="periodic_delta"||f=="huber_basis"||f=="elastic_basis"||f=="lasso_basis";
     };
     for(const auto&spec:specs){
         vector<int>evalWindows=windows;
@@ -3884,10 +4508,11 @@ RelationAnalysis analyzeRelation(const vector<ld>&x,const vector<ld>&y,const vec
         }
         for(int w:evalWindows){
             if(w>sizeToInt(y.size())-1)continue;
-            auto cv=validateRolling(x,y,spec,w,a.tolerancePct,requestedTolerancePct>=0);
+            auto cv=validateRolling(x,y,spec,w,a.tolerancePct,requestedTolerancePct>=0,horizon);
             if(!cv.ok)continue;
             vector<ld>tx(x.end()-w,x.end()),ty(y.end()-w,y.end());
             Model m=fitByFamily(spec.family,tx,ty,spec.degree,spec.param,spec.param2);if(!m.valid)continue;
+            if(!isRegularizedFamily(spec.family)&&m.complexity*3>w)continue;
             m.window=w;m.metrics=cv.metrics;
             vector<ld>fp;bool ok=true;for(ld fx:futureX){ld q=m.predict(fx);if(!isfinite(q)||fabsl(q)>1e300L){ok=false;break;}fp.push_back(q);}
             if(!ok||fp.size()!=futureX.size()||absurdPrediction(m,y,fp))continue;
@@ -5752,25 +6377,73 @@ vector<ld> webModelCurve(const Model&m,const vector<ld>&grid){
     return out;
 }
 
-struct WebFamilyCandidate { string family; FamilySpec spec; Model model; };
+struct WebFamilyCandidate { string family; FamilySpec spec; Model model; ld aicc=numeric_limits<ld>::infinity(); ld deltaAicc=numeric_limits<ld>::infinity(); ld weight=0; bool overfit=false; };
 
+// Family sweep. Ranking by raw in-sample RMSE always crowns the most flexible
+// model (high-degree polynomial / RBF interpolation), which is useless for
+// choosing a curve. Candidates are ranked by AICc instead: goodness of fit
+// against the number of effective parameters, with the small-sample correction.
+// Models with no spare degrees of freedom are flagged as overfit and sorted last.
 vector<WebFamilyCandidate> webFitFamilyCandidates(const vector<ld>&x,const vector<ld>&y){
     vector<WebFamilyCandidate>out;
     auto specs=makeSpecs(x,y);
     out.reserve(specs.size());
+    const int n=sizeToInt(y.size());
+    const ld scale=max<ld>(robustScale(y),1e-12L);
+    const ld varFloor=(1e-10L*scale)*(1e-10L*scale);
+    ld dx=1;{vector<ld>d;for(size_t i=1;i<x.size();++i)if(x[i]>x[i-1])d.push_back(x[i]-x[i-1]);if(!d.empty())dx=quantile(d,.5L);}
     for(const auto&spec:specs){
         Model m=fitByFamily(spec.family,x,y,spec.degree,spec.param,spec.param2);
         if(!m.valid || !m.predict) continue;
-        m.fitted=finiteFitted(m,x,y);
-        auto [rmse,mae]=errorMetrics(y,m.fitted);
-        m.metrics.rmse=rmse; m.metrics.mae=mae; m.metrics.r2=r2Score(y,m.fitted);
-        m.nextValue=m.predict(x.back());
+        // Recursive families (Holt, AR, Prony, periodic-difference) store the DATA as "fitted",
+        // which would make their in-sample error exactly zero. Their honest in-sample score is the
+        // one-step-ahead error from a model refitted on the preceding observations only.
+        const bool recursive=(spec.family=="holt"||spec.family=="damped_holt"||spec.family=="ar"||spec.family=="differenced_ar"||spec.family=="prony"||spec.family=="periodic_delta");
+        int nEff=n;ld rmse=0,mae=0,r2v=0;
+        if(recursive){
+            vector<ld>fv(n,numeric_limits<ld>::quiet_NaN()),av,pv;
+            const int minTrain=max(8,spec.degree+4);
+            for(int i=minTrain;i<n;++i){
+                vector<ld>tx(x.begin(),x.begin()+i),ty(y.begin(),y.begin()+i);
+                Model pm=fitByFamily(spec.family,tx,ty,spec.degree,spec.param,spec.param2);
+                if(!pm.valid||!pm.predict)continue;
+                ld v=pm.predict(x[i]);if(!isfinite(v))continue;
+                fv[i]=v;av.push_back(y[i]);pv.push_back(v);
+            }
+            if((int)av.size()<max(6,n/3))continue;
+            auto em=errorMetrics(av,pv);rmse=em.first;mae=em.second;r2v=r2Score(av,pv);nEff=sizeToInt(av.size());
+            m.fitted.assign(n,0);for(int i=0;i<n;++i)m.fitted[i]=isfinite(fv[i])?fv[i]:y[i];
+        }else{
+            m.fitted=finiteFitted(m,x,y);
+            auto em=errorMetrics(y,m.fitted);rmse=em.first;mae=em.second;r2v=r2Score(y,m.fitted);
+        }
+        if(!isfinite(rmse))continue;
+        m.metrics.rmse=rmse; m.metrics.mae=mae; m.metrics.r2=r2v;
+        m.nextValue=m.predict(x.back()+dx);
         attachNumericRoots(m,x,true);
-        out.push_back({spec.family,spec,m});
+        WebFamilyCandidate c{spec.family,spec,m};
+        const ld k=max(1,m.complexity);
+        const ld sse=rmse*rmse*(ld)nEff;
+        const ld mse=max<ld>(sse/(ld)nEff,varFloor);
+        if((ld)nEff-k-1.0L>0){
+            c.aicc=(ld)nEff*logl(mse)+2.0L*k+2.0L*k*(k+1.0L)/((ld)nEff-k-1.0L);
+        }else{
+            c.aicc=numeric_limits<ld>::infinity();
+            c.overfit=true;
+        }
+        out.push_back(c);
     }
+    ld best=numeric_limits<ld>::infinity();
+    for(const auto&c:out)best=min(best,c.aicc);
+    ld wsum=0;
+    for(auto&c:out){
+        if(isfinite(c.aicc)&&isfinite(best)){c.deltaAicc=c.aicc-best;c.weight=expl(-0.5L*min<ld>(c.deltaAicc,700.0L));wsum+=c.weight;}
+    }
+    if(wsum>0)for(auto&c:out)c.weight/=wsum;
     stable_sort(out.begin(),out.end(),[](const WebFamilyCandidate&a,const WebFamilyCandidate&b){
+        if(a.overfit!=b.overfit)return !a.overfit;
+        if(a.aicc!=b.aicc)return a.aicc<b.aicc;
         if(a.model.metrics.rmse!=b.model.metrics.rmse)return a.model.metrics.rmse<b.model.metrics.rmse;
-        if(a.model.metrics.mae!=b.model.metrics.mae)return a.model.metrics.mae<b.model.metrics.mae;
         if(a.model.complexity!=b.model.complexity)return a.model.complexity<b.model.complexity;
         return a.model.name<b.model.name;
     });
@@ -5784,6 +6457,10 @@ string webFamilyCandidateJson(const WebFamilyCandidate&c){
        << "\"degree\":" << c.spec.degree << ','
        << "\"param\":" << webJsonNumber(c.spec.param) << ','
        << "\"param2\":" << webJsonNumber(c.spec.param2) << ','
+       << "\"aicc\":" << webJsonNumber(c.aicc) << ','
+       << "\"deltaAicc\":" << webJsonNumber(c.deltaAicc) << ','
+       << "\"weight\":" << webJsonNumber(c.weight) << ','
+       << "\"overfit\":" << webJsonBool(c.overfit) << ','
        << "\"model\":" << webModelJson(c.model,true)
        << '}';
     return ss.str();

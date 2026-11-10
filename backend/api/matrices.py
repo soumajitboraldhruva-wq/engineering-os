@@ -303,6 +303,14 @@ def matrix_metadata(A: np.ndarray, tolerance: float) -> Dict[str, Any]:
     }
 
 
+def repeated_integral(expr: sp.Expr, var: sp.Symbol, order: int = 1) -> sp.Expr:
+    """Indefinite integral applied `order` times (sp.integrate(expr, var, n) would read n as a limit)."""
+    result = expr
+    for _ in range(max(1, int(order))):
+        result = sp.integrate(result, var)
+    return result
+
+
 def calculus_variable(name: str) -> sp.Symbol:
     name = str(name).strip()
     if name not in BASE_SYMBOLS:
@@ -404,6 +412,14 @@ def solve_system(req: MatrixSolveRequest) -> Dict[str, Any]:
                 explanation = "A has full column rank and the solution is unique."
 
         residual = A @ x - b
+        null_space: List[List[float]] = []
+        if rank_A < n:
+            # Right singular vectors belonging to (numerically) zero singular values span the null
+            # space: every solution of a consistent system is x + sum(t_i * v_i).
+            _, sv, vt = np.linalg.svd(A, full_matrices=True)
+            cutoff = tol * max(1.0, float(sv[0]) if sv.size else 1.0)
+            null_rows = [vt[i] for i in range(vt.shape[0]) if i >= sv.size or sv[i] <= cutoff]
+            null_space = [[float(v) for v in row] for row in null_rows]
         inverse = None
         determinant = None
         condition_number = None
@@ -427,6 +443,8 @@ def solve_system(req: MatrixSolveRequest) -> Dict[str, Any]:
             "residual_vector": residual.tolist(),
             "residual_norm": np.linalg.norm(residual),
             "condition_number": condition_number,
+            "nullity": int(n - rank_A),
+            "null_space": null_space,
             "metadata": matrix_metadata(A, tol),
             "error": None,
         })
@@ -462,7 +480,7 @@ def operation_result(req: MatrixOperationRequest) -> Dict[str, Any]:
         if operation in {"transpose"}:
             return {"operation": operation, **render_matrix(M.T)}
 
-        if operation in {"determinant", "trace", "inverse", "eigenvalues", "eigenvectors", "svd", "qr", "lu", "cholesky", "pseudoinverse", "pinv", "norm", "multiply", "power"}:
+        if operation in {"determinant", "trace", "inverse", "rank", "eigenvalues", "eigenvectors", "svd", "qr", "lu", "cholesky", "pseudoinverse", "pinv", "norm", "multiply", "power"}:
             A = numeric_matrix(M)
 
         if operation == "determinant":
@@ -594,7 +612,7 @@ def calculus_endpoint(req: MatrixCalculusRequest):
             if (req.lower is None) != (req.upper is None):
                 raise ValueError("Provide both lower and upper bounds for definite integration.")
             if req.lower is None:
-                result = M.applyfunc(lambda expr: sp.simplify(sp.integrate(expr, var, order)))
+                result = M.applyfunc(lambda expr: sp.simplify(repeated_integral(expr, var, order)))
             else:
                 low = parse_expression(req.lower)
                 high = parse_expression(req.upper)
@@ -621,7 +639,7 @@ def symbolic_endpoint(req: SymbolicRequest):
             if (req.lower is None) != (req.upper is None):
                 raise ValueError("Provide both lower and upper bounds for definite integration.")
             if req.lower is None:
-                result = sp.integrate(expr, var, order)
+                result = repeated_integral(expr, var, order)
             else:
                 result = sp.integrate(expr, (var, parse_expression(req.lower), parse_expression(req.upper)))
             op = "integrate"
@@ -760,14 +778,79 @@ def execute_command(command: str, variables: Dict[str, Any], tolerance: float) -
         A_name, exponent = power_match.groups()
         return operation_result(MatrixOperationRequest(operation="power", matrix_a=variables[A_name], power=int(exponent), tolerance=tolerance))
 
-    raise ValueError("Unknown command. Use help() for examples.")
+    return evaluate_matrix_expression(command, variables)
+
+
+def evaluate_matrix_expression(command: str, variables: Dict[str, Any]) -> Dict[str, Any]:
+    """Evaluate expressions such as ``A*B + 2*A``, ``A'`` (transpose), ``A^-1`` or ``A**2``."""
+    names = {n for n in re.findall(IDENTIFIER, command) if n in variables}
+    if not names:
+        raise ValueError("Unknown command. Use help() for examples.")
+    text = re.sub(rf"({IDENTIFIER})'", r"\1.T", command)
+    text = clean_expression(text)
+    local: Dict[str, Any] = dict(SAFE_LOCALS)
+    for name in names:
+        value = variables[name]
+        if isinstance(value, list) and value and isinstance(value[0], list):
+            local[name] = parse_matrix(value)
+        elif isinstance(value, list):
+            local[name] = parse_vector(value)
+        else:
+            local[name] = parse_expression(value)
+    result = sp.sympify(text, locals=local)
+    # Anything that is not a defined variable / known function must be an error, not a silent symbol.
+    from sympy.core.function import AppliedUndef  # noqa: PLC0415
+
+    undefined = [f.func.__name__ for f in result.atoms(AppliedUndef)]
+    if undefined:
+        raise ValueError(f"Unknown function '{undefined[0]}'. Use help() for the available commands.")
+    allowed = set(BASE_SYMBOLS.values())
+    unknown = sorted(str(sym) for sym in result.free_symbols if sym not in allowed)
+    if unknown:
+        raise ValueError(f"Unknown name '{unknown[0]}'. Define it first, e.g. {unknown[0]} = [[1,2],[3,4]].")
+    if isinstance(result, sp.MatrixBase):
+        return {"type": "matrix", "operation": "expression", **render_matrix(result)}
+    return {"type": "value", "operation": "expression", "value": str(sp.simplify(result)), "latex": sp.latex(result)}
+
+
+def split_statements(text: str) -> List[str]:
+    """Split a console input on newlines / semicolons that are not inside brackets."""
+    out: List[str] = []
+    depth = 0
+    cur: List[str] = []
+    for ch in text:
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth = max(0, depth - 1)
+        if ch in ";\n" and depth == 0:
+            if "".join(cur).strip():
+                out.append("".join(cur).strip())
+            cur = []
+        else:
+            cur.append(ch)
+    if "".join(cur).strip():
+        out.append("".join(cur).strip())
+    return out
 
 
 @router.post("/command")
 def command_endpoint(req: CommandRequest):
+    variables = dict(req.variables)
+    results: List[Dict[str, Any]] = []
     try:
-        variables = dict(req.variables)
-        result = execute_command(req.command, variables, req.tolerance)
-        return json_safe({"command": req.command, "result": result, "variables": variables, "error": None})
+        statements = split_statements(req.command) or [req.command]
+        for statement in statements:
+            result = execute_command(statement, variables, req.tolerance)
+            results.append({"command": statement, "result": result})
+        last = results[-1]["result"] if results else None
+        return json_safe({
+            "command": req.command, "result": last, "results": results,
+            "variables": variables, "error": None,
+        })
     except Exception as exc:
-        return {"command": req.command, "result": None, "variables": req.variables, "error": str(exc)}
+        # keep the variables assigned by earlier statements of the same input
+        return json_safe({
+            "command": req.command, "result": None, "results": results,
+            "variables": variables, "error": str(exc),
+        })

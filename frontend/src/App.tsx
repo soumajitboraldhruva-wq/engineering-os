@@ -15,6 +15,9 @@ import GraphingModule from './components/Graphing';
 import SequenceLab from './components/SequenceLab';
 import CubeSolver from './components/CubeSolver';
 
+// The Cube Solver is hidden for now (not deleted). Set VITE_SHOW_CUBE_SOLVER=true to show it again.
+const SHOW_CUBE_SOLVER = import.meta.env.VITE_SHOW_CUBE_SOLVER === 'true';
+
 const navButtonClass = (active: boolean) =>
   `flex w-full items-center rounded-xl p-3 text-left text-sm font-medium transition-colors ${
     active ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-200 hover:bg-slate-800'
@@ -63,13 +66,17 @@ export default function App() {
             Advanced Analyser
           </button>
 
-          <div className="mb-2 ml-2 mt-7 text-[11px] font-bold uppercase tracking-wider text-slate-500">
-            Puzzles
-          </div>
-          <button type="button" onClick={() => setActiveTab('cube')} className={navButtonClass(activeTab === 'cube')}>
-            <Box className="mr-3" size={19} />
-            Cube Solver
-          </button>
+          {SHOW_CUBE_SOLVER && (
+            <>
+              <div className="mb-2 ml-2 mt-7 text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                Puzzles
+              </div>
+              <button type="button" onClick={() => setActiveTab('cube')} className={navButtonClass(activeTab === 'cube')}>
+                <Box className="mr-3" size={19} />
+                Cube Solver
+              </button>
+            </>
+          )}
         </nav>
 
         <div className="border-t border-slate-800 p-4">
@@ -87,7 +94,7 @@ export default function App() {
           {activeTab === 'matrix' && <MatrixModule />}
           {activeTab === 'sequence' && <SequenceLab />}
           {activeTab === 'ode' && <ODESolver />}
-          {activeTab === 'cube' && <CubeSolver />}
+          {SHOW_CUBE_SOLVER && activeTab === 'cube' && <CubeSolver />}
         </div>
       </main>
     </div>
